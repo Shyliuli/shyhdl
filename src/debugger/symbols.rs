@@ -616,6 +616,34 @@ fn build_dwarf(
     );
     set(unit, root, DW_AT_stmt_list, AttributeValue::LineProgramRef);
 
+    // GDB finds a block by looking up the function symbol that contains the PC,
+    // and a DAP front end hangs its variable list on that block's static
+    // block -- the same scope `info variables` reads. A line-table row alone
+    // names no function, so the observation points get a subprogram of their
+    // own; `tick` stays the separate anchor `break tick if <expr>` uses.
+    let replay = unit.add(root, DW_TAG_subprogram);
+    set(unit, replay, DW_AT_name, string("replay"));
+    set(
+        unit,
+        replay,
+        DW_AT_low_pc,
+        AttributeValue::Address(Address::Constant(point_pc[0])),
+    );
+    set(
+        unit,
+        replay,
+        DW_AT_high_pc,
+        AttributeValue::Udata(tick_pc - point_pc[0]),
+    );
+    set(unit, replay, DW_AT_external, AttributeValue::Flag(true));
+    set(
+        unit,
+        replay,
+        DW_AT_decl_file,
+        AttributeValue::FileIndex(Some(listing_file)),
+    );
+    set(unit, replay, DW_AT_decl_line, AttributeValue::Udata(1));
+
     let tick = unit.add(root, DW_TAG_subprogram);
     set(unit, tick, DW_AT_name, string(TICK));
     set(
@@ -671,7 +699,10 @@ fn build_dwarf(
                 DW_AT_location,
                 AttributeValue::Exprloc(location.clone()),
             );
-            set(unit, die, DW_AT_external, AttributeValue::Flag(true));
+            // File scope, not `external`: GDB files non-external variables in
+            // the block `info variables` and a DAP front end's `Globals` scope
+            // both read, and `p <name>` still resolves them from any frame of
+            // this unit, including a conditional `break tick if <expr>`.
             set(unit, die, DW_AT_decl_file, decl_file.clone());
             set(
                 unit,

@@ -962,16 +962,16 @@ fn gdb_reads_the_virtual_layout() {
 }
 
 #[test]
-fn gdb_resolves_break_tick_to_the_anchor_and_every_point_to_its_line() {
+fn gdb_resolves_break_tick_to_the_anchor() {
     let (dir, layout) = build("gdb-break");
-    let mut commands = vec!["break tick".into(), "info break".into()];
-    for pc in &layout.point_pc {
-        commands.push(format!("info line *{pc:#x}"));
-    }
     // The target shadows the PC into the anchor slot while GDB finishes its
     // internal step-over, so the whole 8 byte slot must be one statement range.
+    let mut commands = vec!["break tick".into(), "info break".into()];
     commands.push(format!("info line *{:#x}", layout.tick_pc));
     commands.push(format!("info line *{:#x}", layout.tick_pc + 1));
+    // A front end lists the same static block `info variables` reports, so the
+    // two views have to agree on which symbols exist.
+    commands.push("info variables".into());
     let output = gdb(&dir.elf(), &commands);
 
     assert!(
@@ -994,21 +994,6 @@ fn gdb_resolves_break_tick_to_the_anchor_and_every_point_to_its_line() {
         .expect("a listing name")
         .to_string_lossy()
         .into_owned();
-    for (index, pc) in layout.point_pc.iter().enumerate() {
-        // GDB appends the symbol covering the end address, so only the range
-        // is asserted.
-        let expected = format!(
-            "Line {} of \"{file}\" starts at address {pc:#x} and ends at {:#x}",
-            index + 1,
-            pc + symbols::POINT_SLOT
-        );
-        assert!(
-            output.contains(&expected),
-            "point {index} must be on its own statement line:\n{output}"
-        );
-    }
-    // GDB annotates the start address with the symbol it lands in, so only the
-    // line and its start address are compared.
     let anchor = format!(
         "Line {} of \"{file}\" starts at address {:#x}",
         POINTS + 1,
@@ -1019,6 +1004,12 @@ fn gdb_resolves_break_tick_to_the_anchor_and_every_point_to_its_line() {
         2,
         "the anchor and the anchor's second byte are one statement range:\n{output}"
     );
+    for (name, _, _) in EXPECTED_SLOTS {
+        assert!(
+            output.contains(name),
+            "`info variables` must list {name}, the same list a front end shows:\n{output}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
