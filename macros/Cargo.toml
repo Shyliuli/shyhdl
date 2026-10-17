@@ -5,6 +5,7 @@ edition = "2021"
 rust-version = "1.90"
 description = "Attribute macros that register ShyHDL parts as source text for the runtime compiler"
 documentation = "https://docs.rs/shyhdl-macros"
+repository = "https://github.com/Shyliuli/shyhdl"
 license = "MIT"
 readme = false
 keywords = ["proc-macro", "hdl", "hardware"]

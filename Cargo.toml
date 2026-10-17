@@ -5,6 +5,7 @@ edition = "2021"
 rust-version = "1.90"
 description = "Rust-style hardware description: readable Verilog-2005 out, standalone testbenches, and a record/replay debugger"
 documentation = "https://docs.rs/shyhdl"
+repository = "https://github.com/Shyliuli/shyhdl"
 license = "MIT"
 readme = "README.md"
 keywords = ["hdl", "verilog", "hardware", "rtl", "dsl"]
