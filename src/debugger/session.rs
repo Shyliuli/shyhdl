@@ -305,6 +305,22 @@ impl DebugServer {
 
     /// Wait for one GDB, serve it until it disconnects, and return.
     pub fn serve_blocking(self) -> Result<(), DebugError> {
+        self.accept_and_serve()
+    }
+
+    /// Serve one GDB at a time until the process ends, starting every session
+    /// from the first observation point.
+    ///
+    /// A front end restarts a replay by reconnecting, so the listener has to
+    /// outlive a session; the recording itself is untouched, only the cursor is
+    /// rebuilt.
+    pub fn serve_sessions(self) -> Result<(), DebugError> {
+        loop {
+            self.accept_and_serve()?;
+        }
+    }
+
+    fn accept_and_serve(&self) -> Result<(), DebugError> {
         let (stream, _) = self.listener.accept().map_err(|source| DebugError::Io {
             path: PathBuf::from(format!("127.0.0.1:{}", self.port)),
             source,
@@ -313,11 +329,21 @@ impl DebugServer {
             path: PathBuf::from("gdb connection"),
             source,
         })?;
-        self.serve_stream(stream)
+        // A fresh cursor per session: a restart starts at the beginning, and no
+        // state from the previous session (watchpoints, position) leaks in. The
+        // recording is re-read rather than cloned, because the waveform owns the
+        // decoder state; the file is the run's own artifact and does not change
+        // while a session is being restarted.
+        let recording = self.engine.waveform().path().to_path_buf();
+        let waveform = crate::waveform::Waveform::load(&recording)
+            .map_err(|error| DebugError::Waveform(error.to_string()))?;
+        let engine = ReplayEngine::new(waveform, self.engine.mode().clone())
+            .map_err(|error| DebugError::Waveform(error.to_string()))?;
+        self.serve_stream(engine, stream)
     }
 
-    fn serve_stream(self, stream: TcpStream) -> Result<(), DebugError> {
-        let mut target = ReplayTarget::new(self.engine, self.layout, self.signal_of_var)
+    fn serve_stream(&self, engine: ReplayEngine, stream: TcpStream) -> Result<(), DebugError> {
+        let mut target = ReplayTarget::new(engine, self.layout.clone(), self.signal_of_var.clone())
             .map_err(|error| DebugError::Session(error.to_string()))?;
         let connection: Box<dyn ConnectionExt<Error = std::io::Error>> = Box::new(stream);
         let gdb = GdbStub::new(connection);

@@ -31,7 +31,7 @@ fn main() -> shyhdl::Result<()> {
         });
     }
 
-    let dbg = Debugger::new(&result)?;
+    let dbg = Debugger::new(&result, 10)?;
     println!("debug start on port :{}", dbg.port);
     if std::env::var_os("SHYHDL_DEBUG").is_some() {
         // Blocks while one GDB session replays this recording.

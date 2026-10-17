@@ -105,7 +105,7 @@ fn main() {
     println!("manifest={}", result.manifest_path.display());
 
     // Serve the recording of this run to a real GDB over loopback.
-    let dbg = match Debugger::new(&result) {
+    let dbg = match Debugger::new(&result, 10) {
         Ok(dbg) => dbg,
         Err(error) => {
             eprintln!("cannot start the debugger: {error}");

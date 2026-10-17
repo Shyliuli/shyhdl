@@ -521,9 +521,11 @@ impl Simulator {
 
 /// A GDB server for the recording of one run, listening on loopback.
 ///
-/// `Debugger::new()` binds a free loopback port, so the port is known before the
-/// session starts and can be printed or handed to a tool; [`Debugger::run`] then
-/// serves exactly one GDB session over that recording.
+/// [`Debugger::new`] takes the step of the replay timeline — how far one `step`
+/// moves, in nanoseconds — and binds a free loopback port,
+/// so both are known before the session starts and can be printed or handed to a
+/// tool. [`Debugger::run`] then serves GDB sessions until the process ends,
+/// restarting every session at the first observation point.
 pub struct Debugger {
     /// Loopback port the server listens on.
     pub port: u16,
@@ -533,12 +535,14 @@ pub struct Debugger {
 }
 
 impl Debugger {
-    /// Prepare a session for the recording a run wrote.
+    /// Prepare a session for the recording a run wrote, stepping `step_ns`
+    /// nanoseconds at a time (`10` is a 10 ns grid).
     ///
-    /// This is the `Debugger::new()` of the object-shaped API: the recording is
-    /// part of the run, so the run is what a session is built from.
-    pub fn new(result: &RunResult) -> Result<Debugger> {
-        Debugger::for_run(result)
+    /// There is no default step: a step is a property of the replay a caller
+    /// asks for — one clock period, one time step, whatever the recording is
+    /// being read for — and a constant here would silently decide it.
+    pub fn new(result: &RunResult, step_ns: u32) -> Result<Debugger> {
+        Debugger::for_run(result, step_ns)
     }
 
     /// Prepare a session for the recording a run wrote.
@@ -546,7 +550,7 @@ impl Debugger {
     /// The manifest the run wrote is the pairing: it names the metadata file and
     /// the recording root of every DUT instance, which is what the server needs
     /// to bind symbols to signals.
-    pub fn for_run(result: &RunResult) -> Result<Debugger> {
+    pub fn for_run(result: &RunResult, step_ns: u32) -> Result<Debugger> {
         let manifest = crate::simulation::load_manifest(&result.manifest_path)?;
         let wave = manifest.wave.as_ref().ok_or(Error::NotImplemented {
             feature: "this run recorded no waveform, so there is nothing to replay",
@@ -585,17 +589,14 @@ impl Debugger {
             path: recording.clone(),
             source: std::io::Error::other(error.to_string()),
         })?;
-        // A session always needs reference points. A fixed grid is the honest
-        // default: it needs no clock to be claimed, and `10ns` is a step the
-        // testbench timescale can express (a recording whose precision does not
-        // divide it falls back to one tick).
-        let period = waveform
-            .ticks(crate::waveform::Timescale::new(
-                10,
-                crate::waveform::TimeUnit::Nano,
-            ))
-            .unwrap_or(1)
-            .max(1);
+        // The step is the caller's, converted into the recording's own ticks. A
+        // step the timescale cannot express is reported, not rounded away: the
+        // grid a caller asks for is the grid they get.
+        let step = crate::waveform::Timescale::new(u64::from(step_ns), crate::waveform::TimeUnit::Nano);
+        let period = waveform.ticks(step).map_err(|error| Error::Io {
+            path: recording.clone(),
+            source: std::io::Error::other(error.to_string()),
+        })?;
         let step = crate::replay::StepMode::Interval { origin: 0, period };
         let engine =
             crate::replay::ReplayEngine::new(waveform, step).map_err(|error| Error::Io {
@@ -617,7 +618,11 @@ impl Debugger {
         })
     }
 
-    /// Serve exactly one GDB session, then return.
+    /// Serve GDB sessions one at a time until the process ends, each starting
+    /// from the first observation point.
+    ///
+    /// Reconnecting is how a front end restarts a replay, so the listener stays
+    /// up; the recording itself is only read.
     ///
     /// `result` names the run to replay, which is what pairs the recording with
     /// the design it came from.
@@ -631,7 +636,7 @@ impl Debugger {
         }
         let elf = self.server.elf_path().to_path_buf();
         let server = self.server;
-        server.serve_blocking().map_err(|error| Error::Io {
+        server.serve_sessions().map_err(|error| Error::Io {
             path: elf,
             source: std::io::Error::other(error.to_string()),
         })?;

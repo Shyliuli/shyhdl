@@ -130,7 +130,7 @@ $ cargo run -p shyhdl-example-tour     # Rust 模块拆分：datapath / select /
 - Verilator 后端是二态语义，不声称完整四态仿真。
 - Verilator 的 verilation kit 路径必须是 ASCII；ShyHDL 自身的源码与生成物支持中文路径。
 - 宏模式把程序中登记的所有条目拼成一份源码编译，多个设计若声明同名类型会冲突。
-- `Debugger::new` 需要 `&RunResult`，因为端口与录制配对来自该次运行的 manifest。
+- `Debugger::new` 需要 `&RunResult` 和步长（例如 `ns(10)`）：端口与录制配对来自那次运行的 manifest，步长由调用方决定。
 
 ## 项目结构
 

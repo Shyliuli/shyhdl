@@ -114,7 +114,7 @@ fn main() -> shyhdl::Result<()> {
 let mut sim = simulate::<Adder4>("build/run")?;
 let result = sim.run(wraps)?;
 
-let dbg = Debugger::new(&result)?;
+let dbg = Debugger::new(&result, 10)?;
 println!("elf={}", dbg.elf_path().display());
 println!("port={}", dbg.port);
 println!("gdb={}", dbg.gdb_argv().join(" "));
