@@ -1,0 +1,69 @@
+[package]
+name = "shyhdl"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "Rust-style hardware description: readable Verilog-2005 out, standalone testbenches, and a record/replay debugger"
+documentation = "https://docs.rs/shyhdl"
+license = "MIT"
+readme = "README.md"
+keywords = ["hdl", "verilog", "hardware", "rtl", "dsl"]
+categories = ["hardware-support", "compilers"]
+# Requirements tracking is development material, not part of the published crate.
+exclude = ["REQUIREMENTS.md"]
+# `examples/*.shy.rs` are ShyHDL DSL inputs, not Rust example targets.
+autoexamples = false
+
+[workspace]
+# The attribute macros live in their own proc-macro crate, which a proc-macro
+# must be; everything else is this crate.
+members = [
+    "macros",
+    "examples/adder",
+    "examples/select",
+    "examples/tour",
+]
+
+[dependencies]
+# Diagnostics: every error carries its path, source span or underlying cause.
+thiserror = "2"
+
+# Shared design metadata exchanged between the frontend and the debugger.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Command-line surface of the `shyhdl` binary.
+clap = { version = "4", features = ["derive"] }
+
+# The M1 frontend reads ShyHDL source as Rust syntax. `proc-macro2` is declared
+# directly only to turn on `span-locations`, which is what gives `SourceSpan`
+# real line/column information. `quote` is deliberately absent: nothing emits
+# Rust tokens yet, add it when code generation actually needs it.
+syn = { version = "2", features = ["full", "extra-traits", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+
+# Waveform reading for the record/replay layer (M0): VCD and FST, one parser,
+# no second waveform dependency. 0.25.7 is the latest 0.25.x in the index and
+# needs rustc 1.90; VCD/FST support is always compiled in (the only feature is
+# the optional `serde1`), so no feature selection is needed here.
+wellen = "0.25"
+
+# Debugger (M0): a real GDB remote-serial-protocol stub, plus the ELF and DWARF
+# writers used to expose source-level variables to standard GDB commands
+# (REQ-DBG-050, REQ-DBG-051). Requested by the debugger worker; `write` is the
+# only feature needed, and the default x86_64 virtual target description comes
+# from `gdbstub_arch`.
+gdbstub = "0.7.10"
+gdbstub_arch = "0.3.3"
+object = { version = "0.38", features = ["write"] }
+gimli = { version = "0.32", features = ["write"] }
+
+# Attribute macros: `#[hardware_instance]`, `#[hardware]` and `#[hardware_test]`
+# mark the items a design consists of, and register them for the Rust interop
+# surface (see `src/interop.rs`). A separate crate because proc-macro crates
+# cannot export anything else.
+shyhdl-macros = { version = "0.1.0", path = "macros" }
+
+# Compile-time registration of the marked design items, used by `interop` to
+# read a design back out of the crate source.
+inventory = "0.3"

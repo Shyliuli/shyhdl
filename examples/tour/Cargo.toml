@@ -1,0 +1,9 @@
+[package]
+name = "shyhdl-example-tour"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "A small system split across Rust modules, driven from main"
+
+[dependencies]
+shyhdl = { path = "../.." }

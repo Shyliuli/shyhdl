@@ -1,0 +1,27 @@
+# Build output
+/target/
+
+# Generated artifacts: Verilog, metadata and waveforms are build results, not
+# sources, and must not be committed (REQ-VER-008). Recordings written by a run
+# may also land outside build/ and out/, so the patterns are global.
+/build/
+/out/
+*.vcd
+*.fst
+*.meta.json
+*.manifest.json
+obj_dir/
+*.vvp
+
+# Hand-written test fixtures are sources, not build output: the replay tests
+# read committed VCD files to pin down the algorithms.
+!tests/fixtures/**/*.vcd
+!tests/fixtures/**/*.fst
+!tests/fixtures/**/*.meta.json
+
+# Local toolchain checkout, if anyone unpacks one into the repository
+/.tools/
+
+# Local editor and shell noise
+*.rs.bk
+*.swp

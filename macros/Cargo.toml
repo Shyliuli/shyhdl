@@ -1,0 +1,20 @@
+[package]
+name = "shyhdl-macros"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "Attribute macros that register ShyHDL parts as source text for the runtime compiler"
+documentation = "https://docs.rs/shyhdl-macros"
+license = "MIT"
+readme = false
+keywords = ["proc-macro", "hdl", "hardware"]
+categories = ["hardware-support"]
+
+[lib]
+name = "shyhdl_macros"
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

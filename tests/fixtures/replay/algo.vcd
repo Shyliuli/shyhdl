@@ -1,0 +1,87 @@
+$date
+    2026-01-01
+$end
+$version
+    ShyHDL replay fixture, written by hand.
+    NOT produced by Verilator: it exists to pin down replay algorithms.
+$end
+$timescale 1ns $end
+$scope module top $end
+$var wire 1 ! clk $end
+$var wire 1 " rst_n $end
+$var wire 1 # d $end
+$var wire 8 % data [7:0] $end
+$var wire 8 % data_alias [7:0] $end
+$var wire 72 & wide [71:0] $end
+$var wire 4 ' nib [3:0] $end
+$var wire 2 ( state [1:0] $end
+$var wire 1 ) xbit $end
+$var wire 1 * zbit $end
+$var wire 1 / gclk $end
+$var wire 1 ; late $end
+$scope module cpu $end
+$var wire 1 + busy $end
+$scope module alu $end
+$var wire 1 , carry $end
+$upscope $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+#0
+$dumpvars
+0!
+1"
+0#
+b00000000 %
+b000000000000000000000000000000000000000000000000000000000000000000000000 &
+b0000 '
+b00 (
+x)
+z*
+0/
+0+
+0,
+$end
+#5
+1!
+1/
+1,
+#10
+0!
+0/
+b00000001 %
+b0001 '
+1+
+#13
+1#
+b00000010 %
+#14
+0#
+#20
+1;
+1!
+1/
+b00000011 %
+b0010 '
+b100000000000000000000000000000000000000000000000000000000000000000000000 &
+0,
+#25
+0!
+0/
+#30
+1!
+b00000100 %
+b0011 '
+b01 (
+1)
+0+
+#35
+0!
+#40
+1!
+b11111111 %
+b1111 '
+#45
+0!
+#50
+1!

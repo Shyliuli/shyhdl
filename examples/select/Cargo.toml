@@ -1,0 +1,9 @@
+[package]
+name = "shyhdl-example-select"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Selection and matching: if and match as values"
+
+[dependencies]
+shyhdl = { path = "../.." }
