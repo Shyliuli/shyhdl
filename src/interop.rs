@@ -315,6 +315,40 @@ pub fn test<T: 'static>(name: &str, out: impl AsRef<Path>) -> Result<Outcome> {
     Ok(report.outcome)
 }
 
+/// Put the design on the NVBoard virtual board and run it until the window is
+/// closed.
+///
+/// Switches drive the design's inputs, LEDs show its outputs, and a
+/// clock-looking input (`clk`, `clock`, `clk_i`, `clock_i`) is toggled by the
+/// frame loop. Only available with the `nvboard` feature; the board sources are
+/// vendored, so nothing else has to be fetched.
+#[cfg(feature = "nvboard")]
+pub fn board<T: 'static>(out: impl AsRef<Path>) -> Result<crate::nvboard::BoardRun> {
+    let compiled = compile_design::<T>()?;
+    let top = compiled.design.top();
+    let ports = top
+        .ports
+        .iter()
+        .map(|port| {
+            Ok(crate::nvboard::BoardPort::new(
+                port.verilog_name.clone(),
+                port.ty.bit_width()?,
+                matches!(port.dir, PortDir::In),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let build_dir = out.as_ref().join("board");
+    crate::nvboard::run(&crate::nvboard::BoardOptions {
+        build_dir,
+        top: top.verilog_name.clone(),
+        verilog: compiled.verilog,
+        ports,
+        clock: None,
+        announce: true,
+    })
+}
+
 /// Hand the process to the ordinary command-line interface.
 ///
 /// `main` can be `shyhdl::run()`: the same subcommands and the same exit codes as

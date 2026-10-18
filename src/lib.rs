@@ -25,6 +25,8 @@ pub mod error;
 pub mod frontend;
 pub mod interop;
 pub mod metadata;
+#[cfg(feature = "nvboard")]
+pub mod nvboard;
 // Crate-private: normalized match patterns and coverage, shared by the
 // frontend's `match` lowering and the testbench. Not a public API yet.
 mod pattern;
@@ -44,6 +46,8 @@ pub use metadata::{
     SourceSpan, SourceUnit, TypeField, ValueType, Variable, SCHEMA_VERSION,
 };
 pub use simulation::Outcome;
+#[cfg(feature = "nvboard")]
+pub use interop::board;
 
 // Re-exported so a user writes `use shyhdl::*;` once and gets the attributes too.
 pub use shyhdl_macros::{hardware, hardware_instance, hardware_test};

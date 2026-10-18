@@ -90,7 +90,7 @@ fn wraps() {
 
 | 类别 | 支持内容 |
 | --- | --- |
-| 模块 | `#[hardware_instance] struct`、`#[instance]` 子实例、赋值连线、构建期常量泛型 |
+| 模块 | `#[hardware_instance] struct`、`#[instance]` 子实例、实例数组 `[Child; N]`、赋值连线、构建期常量泛型 |
 | 数据类型 | `bool`、`U<N>` / `uint<N>`、`I<N>` / `int<N>`、`struct`、带 payload 的 `enum`、`Option`、`Result`、`[T; N]` |
 | 组合过程 | `run` 中的 `let`、赋值、`if`、`match`、构建期 `for`，按源码顺序求值 |
 | 时序过程 | 事件臂 `#[Pedge]` / `#[Nedge]`，最后一个臂是时钟，状态赋值非阻塞 |
@@ -112,6 +112,34 @@ $ cargo run -p shyhdl-example-tour     # Rust 模块拆分：datapath / select /
 ```
 
 单文件示例在 `examples/*.shy.rs`：`adder`、`signed`、`arrays`、`pipeline`、`register`、`packet`。
+
+## 上板验证（可选 feature）
+
+`nvboard` feature 把设计放到 [NVBoard](https://github.com/NJU-ProjectN/nvboard)（NJU 虚拟
+FPGA 板）上跑：开关驱动输入、LED 显示输出，不需要真实板卡。NVBoard 的源码已经放在
+`vendor/nvboard`，不用另外 clone。
+
+```console
+$ cargo run --features nvboard --bin shyhdl -- board examples/adder.shy.rs --top 'Adder<4>'
+```
+
+宏模式里则是库调用，`decoder38` 就是这样用的：
+
+```rust
+if std::env::args().any(|arg| arg == "--nvboard") {
+    let run = shyhdl::board::<Decoder38>("build")?;
+    println!("{}", run.summary());
+    return Ok(());
+}
+```
+
+引脚按端口声明顺序分配：输入接 `SW0..`，输出接 `LD0..`，位宽从低位对齐，超过 16 位会直接报错。
+宽 1、名字是 `clk`/`clock`/`clk_i`/`clock_i` 的输入由帧循环翻转，也可以 `--clock NAME` 指定；
+其余设计就是纯组合逻辑。
+
+构建需要 C++ 编译器，以及 SDL2、SDL2_image、SDL2_ttf 的开发文件（`sdl2-config` 或
+`pkg-config` 能找到即可）。首次运行会把 `vendor/nvboard` 编译成 `libnvboard.a` 缓存到临时目录，
+之后直接复用。没有这个 feature 时 `board` 子命令只提示如何重新构建，其余命令不受影响。
 
 ## 文档
 

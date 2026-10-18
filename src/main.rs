@@ -103,6 +103,8 @@ enum Command {
     ListTests(ListTestsArgs),
     /// Replay a recording under GDB.
     Debug(DebugArgs),
+    /// Put a design on the NVBoard virtual board (needs the `nvboard` feature).
+    Board(BoardArgs),
 }
 
 /// Arguments shared by every command that compiles a design.
@@ -170,6 +172,22 @@ struct TestArgs {
     /// Waveform to record, or `none` to record nothing (REQ-SIM-004).
     #[arg(long, value_name = "FORMAT", value_enum, default_value_t = WaveArg::Vcd)]
     wave: WaveArg,
+}
+
+#[derive(Debug, Args)]
+struct BoardArgs {
+    #[command(flatten)]
+    compile: CompileArgs,
+
+    /// Directory for the board model and its generated runner.
+    #[arg(long, value_name = "DIR", default_value = DEFAULT_OUT_DIR)]
+    out: PathBuf,
+
+    /// Input port to toggle as the clock. Without it a width-1 input named
+    /// `clk`, `clock`, `clk_i` or `clock_i` is used; a design with neither is
+    /// simply combinational.
+    #[arg(long, value_name = "NAME", value_parser = parse_name)]
+    clock: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -320,6 +338,7 @@ fn run(cli: &Cli) -> Result<u8> {
         Command::Test(args) => run_test(args),
         Command::ListTests(args) => run_list_tests(args),
         Command::Debug(args) => run_debug(args),
+        Command::Board(args) => run_board(args),
     }
 }
 
@@ -335,6 +354,8 @@ fn exit_code_for(error: &Error) -> u8 {
         | Error::TypeLayout { .. }
         | Error::MissingSourceLocation { .. } => exit::COMPILE_ERROR,
         Error::Io { .. } | Error::Json { .. } => exit::FAILED,
+        // The board backend's own failures: a missing SDL, a failed compile.
+        Error::Board { .. } => exit::ENVIRONMENT,
     }
 }
 
@@ -467,6 +488,57 @@ fn run_test(args: &TestArgs) -> Result<u8> {
         eprint!("{}", report.stderr);
     }
     Ok(outcome_exit_code(report.outcome))
+}
+
+/// Build the board model and hand the window to the user.
+///
+/// The board keeps the process until its window is closed, so this command is
+/// interactive by nature: switches drive the design's inputs, LEDs show its
+/// outputs, and the pin assignment is printed before the window opens.
+#[cfg(feature = "nvboard")]
+fn run_board(args: &BoardArgs) -> Result<u8> {
+    let source = read_text(&args.compile.source)?;
+    let source_name = source_name(&args.compile.source);
+    let compiled = match compile_source(&source, &source_name, &args.compile.top) {
+        Ok(compiled) => compiled,
+        Err(code) => return Ok(code),
+    };
+
+    let top = compiled.design.top();
+    let ports = top
+        .ports
+        .iter()
+        .map(|port| {
+            Ok(shyhdl::nvboard::BoardPort::new(
+                port.verilog_name.clone(),
+                port.ty.bit_width()?,
+                matches!(port.dir, PortDir::In),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let run = shyhdl::nvboard::run(&shyhdl::nvboard::BoardOptions {
+        build_dir: args.out.clone(),
+        top: top.verilog_name.clone(),
+        verilog: compiled.verilog.clone(),
+        ports,
+        clock: args.clock.clone(),
+        announce: true,
+    })?;
+    for binding in &run.bindings {
+        println!("{binding}");
+    }
+    Ok(exit::OK)
+}
+
+/// The board is compiled out: say how to get it instead of pretending.
+#[cfg(not(feature = "nvboard"))]
+fn run_board(_args: &BoardArgs) -> Result<u8> {
+    eprintln!(
+        "shyhdl: this build has no `nvboard` feature; rebuild with `--features nvboard` to use \
+         `board`"
+    );
+    Ok(exit::NOT_IMPLEMENTED)
 }
 
 /// Exit code of a finished simulation run. A run that did not pass never exits

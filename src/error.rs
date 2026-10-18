@@ -104,4 +104,12 @@ pub enum Error {
         /// What is missing, named after the milestone that owns it.
         feature: &'static str,
     },
+
+    /// The optional NVBoard backend could not build, start or keep running. The
+    /// message carries the tool output that explains why.
+    #[error("nvboard: {message}")]
+    Board {
+        /// What failed.
+        message: String,
+    },
 }

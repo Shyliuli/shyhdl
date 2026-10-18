@@ -106,6 +106,23 @@ fn main() -> shyhdl::Result<()> {
 }
 ```
 
+## 上板（`nvboard` feature）
+
+```rust
+#[cfg(feature = "nvboard")]
+{
+    // 打开虚拟板：开关 -> 输入，LED <- 输出，关窗即退出
+    let run = shyhdl::board::<Adder4>("build")?;
+    for binding in &run.bindings {
+        println!("{binding}");
+    }
+}
+```
+
+`board` 与 `simulate` 用同一份 Verilog，只是把 `main()` 换成 NVBoard 的帧循环；构建、引脚
+分配（`vendor/nvboard` 里的 `libnvboard.a`、`auto_bind.cpp`、`board_runner.cpp`）都写在
+`build/` 下，可以像其它产物一样检查。不启用 feature 时这个函数不存在。
+
 ## 调试
 
 `Debugger` 复用一次运行的录制只读回放，不重新仿真：
