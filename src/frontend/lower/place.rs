@@ -371,7 +371,38 @@ impl Compiler {
                 let (range, ty) = self.place_range(&signal_ty, &path, &span)?;
                 return Ok(Place::Signal { signal, range, ty });
             }
-            if let Some(instance) = self.cur.instance_by_field.get(&first).copied() {
+            if let Some(entry) = self.cur.instance_by_field.get(&first).copied() {
+                // An array of instances is indexed by a build-time constant:
+                // there is no hardware that could select an instance at run time.
+                let instance = match entry {
+                    FieldInstances::Single(index) => index,
+                    FieldInstances::Array { first: base, len } => {
+                        let Some(Component::Bits(index)) = path.first().cloned() else {
+                            return Err(Diagnostic::error(
+                                codes::UNSUPPORTED,
+                                Some(span),
+                                format!(
+                                    "`self.{first}` is an array of {len} instances: use a build-time constant index, for example `self.{first}[0].<port>`"
+                                ),
+                            ));
+                        };
+                        path.remove(0);
+                        let value = consteval::eval(&index, &self.cur.env).map_err(|message| {
+                            Diagnostic::error(codes::NOT_CONSTANT, Some(span.clone()), message)
+                        })?;
+                        if value >= u64::from(len) {
+                            return Err(Diagnostic::error(
+                                codes::OUT_OF_RANGE,
+                                Some(span),
+                                format!(
+                                    "instance {value} is out of range for `{first}`, which has {len} instances (valid: 0..{})",
+                                    len.saturating_sub(1)
+                                ),
+                            ));
+                        }
+                        base + value as usize
+                    }
+                };
                 let Some(Component::Field(port_name)) = path.first().cloned() else {
                     return Err(Diagnostic::error(
                         codes::UNSUPPORTED,

@@ -29,6 +29,26 @@ pub struct Adder4 {
 - 带常量泛型的模块在构建期特化：`Adder<8>`、`Adder<16>` 是两个模块。
 - 子实例用字段名连接：在 `run` 里写 `self.child.a = self.a;`，不需要调用 `child.run()`；
   连接的书写顺序不改变拓扑。
+- 子实例也可以是数组：`#[instance] pub cells: [Child; 4]` 是 4 个实例，Verilog 里叫
+  `cells__0` … `cells__3`，每个元素有自己的输出网 `cells__0_<port>`。用构建期常量下标选一个，
+  连线和读端口都写 `self.cells[i].a`：
+
+  ```rust
+  // 4 位行波进位：上一级的 cout 直接接下一级的 cin
+  self.cells[0].cin = self.cin;
+  for i in 0..3 {
+      self.cells[i + 1].cin = self.cells[i].cout;
+  }
+  for i in 0..4 {
+      self.cells[i].a = self.a[i];
+      self.cells[i].b = self.b[i];
+      self.s[i] = self.cells[i].s;
+  }
+  ```
+
+  下标必须是构建期常量（可以带参数和常量表达式，例如 `i + 1`）：没有哪根线能在运行期选一个
+  子模块。`run` 顶层的构建期 `for` 会先展开再分类，所以循环体里的连线仍然是连线。
+
 - `mod name;` 在同目录加载 `name.shy.rs` 或 `name/mod.shy.rs`，模块名就是 `name`。
 - 端口按具名字段展开：一个 N 位字段对应一个 `[N-1:0]` 端口，不做位域重排。
 

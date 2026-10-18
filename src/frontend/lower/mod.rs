@@ -110,6 +110,15 @@ struct InstanceBuild {
     read_outputs: HashSet<String>,
 }
 
+/// What an `#[instance]` field names: one instance, or an array of them.
+#[derive(Clone, Copy, Debug)]
+enum FieldInstances {
+    /// `#[instance] child: Child`.
+    Single(usize),
+    /// `#[instance] children: [Child; N]`: instances `first..first + len`.
+    Array { first: usize, len: u32 },
+}
+
 /// A port of an instantiated child, with the parent-side net for outputs.
 #[derive(Clone, Debug)]
 struct ChildPort {
@@ -140,7 +149,7 @@ struct ModuleBuild {
     signals: Vec<Signal>,
     signal_by_name: HashMap<String, SignalId>,
     instances: Vec<InstanceBuild>,
-    instance_by_field: HashMap<String, usize>,
+    instance_by_field: HashMap<String, FieldInstances>,
     body: Vec<BodyItem>,
     owners: HashMap<SignalId, Vec<Option<Owner>>>,
     drive_span: HashMap<SignalId, SourceSpan>,
@@ -918,7 +927,23 @@ impl Compiler {
         let mut sequential: Vec<syn::Macro> = Vec::new();
         let mut failed = false;
 
-        for statement in &run.stmts {
+        // A build-time `for` at the top of `run` is expanded before the split, so
+        // a connection written inside it (`self.bank[i].a = ...`) stays wiring
+        // instead of being rejected as a statement of a process.
+        let mut pending: Vec<syn::Stmt> = run.stmts.iter().rev().cloned().collect();
+        while let Some(statement) = pending.pop() {
+            if let syn::Stmt::Expr(syn::Expr::ForLoop(item), _) = &statement {
+                // A loop that connects child inputs is structure, not behavior:
+                // expand it before the split. Everything else stays a process
+                // `for`, with its own scoping and unroll accounting.
+                if self.statements_have_connection(&item.body.stmts) {
+                    if let Some(expanded) = self.expand_run_for(item) {
+                        pending.extend(expanded.into_iter().rev());
+                        continue;
+                    }
+                }
+            }
+            let statement = &statement;
             let macro_statement = match statement {
                 syn::Stmt::Macro(value) => Some(&value.mac),
                 syn::Stmt::Expr(syn::Expr::Macro(value), _) => Some(&value.mac),
@@ -970,6 +995,63 @@ impl Compiler {
         Ok(())
     }
 
+    /// Whether these statements connect a child input anywhere inside them.
+    fn statements_have_connection(&self, statements: &[syn::Stmt]) -> bool {
+        statements.iter().any(|statement| match statement {
+            syn::Stmt::Expr(syn::Expr::Assign(assign), _) => self.is_connection(assign),
+            syn::Stmt::Expr(syn::Expr::ForLoop(item), _) => {
+                self.statements_have_connection(&item.body.stmts)
+            }
+            syn::Stmt::Expr(syn::Expr::If(item), _) => {
+                self.statements_have_connection(&item.then_branch.stmts)
+                    || item.else_branch.as_ref().is_some_and(|(_, branch)| {
+                        matches!(&**branch, syn::Expr::Block(block)
+                            if self.statements_have_connection(&block.block.stmts))
+                    })
+            }
+            _ => false,
+        })
+    }
+
+    /// Expand a top-level build-time `for` into its iterations, with the loop
+    /// variable replaced by the literal value.
+    ///
+    /// Returns `None` when the range is not a build-time constant: the statement
+    /// is then left to the normal path, which reports the diagnostic with the
+    /// right location and wording.
+    fn expand_run_for(&mut self, item: &syn::ExprForLoop) -> Option<Vec<syn::Stmt>> {
+        let (name, _) = pattern_name(&item.pat).ok()?;
+        let syn::Expr::Range(range) = &*item.expr else {
+            return None;
+        };
+        let start = match &range.start {
+            Some(start) => consteval::eval(start, &self.cur.env).ok()?,
+            None => 0,
+        };
+        let mut end = match &range.end {
+            Some(end) => consteval::eval(end, &self.cur.env).ok()?,
+            None => return None,
+        };
+        if matches!(range.limits, syn::RangeLimits::Closed(_)) {
+            end = end.checked_add(1)?;
+        }
+        if end.saturating_sub(start) > MAX_UNROLL {
+            return None;
+        }
+        let mut out = Vec::new();
+        for value in start..end {
+            for statement in &item.body.stmts {
+                let mut statement = statement.clone();
+                syn::visit_mut::VisitMut::visit_stmt_mut(
+                    &mut Subst { name: &name, value },
+                    &mut statement,
+                );
+                out.push(statement);
+            }
+        }
+        Some(out)
+    }
+
     /// True when an assignment drives a child input port: that is structure, not
     /// behavior, so it must not end up inside a process.
     fn is_connection(&self, assign: &syn::ExprAssign) -> bool {
@@ -979,10 +1061,21 @@ impl Compiler {
         let Some(Component::Field(field)) = path.first() else {
             return false;
         };
-        let Some(instance) = self.cur.instance_by_field.get(field).copied() else {
+        let Some(entry) = self.cur.instance_by_field.get(field).copied() else {
             return false;
         };
-        let Some(Component::Field(port)) = path.get(1) else {
+        // An array of instances needs an index before the port; the index is
+        // checked when the place is resolved, not here.
+        let (instance, path) = match entry {
+            FieldInstances::Single(instance) => (instance, &path[1..]),
+            FieldInstances::Array { first, .. } => {
+                if !matches!(path.get(1), Some(Component::Bits(_))) {
+                    return false;
+                }
+                (first, &path[2..])
+            }
+        };
+        let Some(Component::Field(port)) = path.first() else {
             return false;
         };
         self.cur.instances[instance]
@@ -1029,7 +1122,31 @@ impl Compiler {
             self.diagnostics.push(diagnostic);
             return Err(());
         }
-        let (child_name, child_args) = match parse::type_path_args(&field.ty) {
+
+        // `#[instance] bank: [Child; N]` is N instances of `Child`. Each element
+        // becomes a real instance with its own name, so the Verilog emitter, the
+        // metadata paths and the debugger keep seeing plain instances.
+        let (element_ty, count) = match &field.ty {
+            syn::Type::Array(array) => {
+                let count = match consteval::eval(&array.len, &self.cur.env) {
+                    Ok(count) => count,
+                    Err(message) => {
+                        return self.err(codes::NOT_CONSTANT, Some(span.clone()), message)
+                    }
+                };
+                if count == 0 {
+                    return self.err(
+                        codes::BAD_TYPE,
+                        Some(span.clone()),
+                        format!("instance array `{}` has length 0", field.name),
+                    );
+                }
+                ((*array.elem).clone(), count)
+            }
+            other => (other.clone(), 1),
+        };
+
+        let (child_name, child_args) = match parse::type_path_args(&element_ty) {
             Ok(parts) => parts,
             Err(message) => return self.err(codes::BAD_TYPE, Some(span), message),
         };
@@ -1070,7 +1187,7 @@ impl Compiler {
         let params = params_of(&child, &env);
 
         let child_module = self.lower_module(&child, env, false)?;
-        let child_ports: Vec<ChildPort> = self.modules[child_module]
+        let child_ports_template: Vec<ChildPort> = self.modules[child_module]
             .ports
             .iter()
             .map(|port| ChildPort {
@@ -1080,45 +1197,63 @@ impl Compiler {
                 parent_signal: None,
             })
             .collect();
+        let port_count = child_ports_template.len();
 
-        let index = self.cur.instances.len();
-        let mut child_ports = child_ports;
+        let first = self.cur.instances.len();
+        for element in 0..count {
+            let (display_name, verilog_name) = if count == 1 {
+                (field.name.clone(), field.name.clone())
+            } else {
+                (
+                    format!("{}[{}]", field.name, element),
+                    format!("{}__{}", field.name, element),
+                )
+            };
+            let index = first + element as usize;
+            let mut child_ports = child_ports_template.clone();
 
-        // A child's output needs a parent-side net to be connected to; it is
-        // driven by the instance itself (owner Instance) and may not be written
-        // by the parent.
-        for (port_index, child_port) in child_ports.iter_mut().enumerate() {
-            if child_port.dir != PortDir::Out {
-                continue;
+            // A child's output needs a parent-side net to be connected to; it is
+            // driven by the instance itself (owner Instance) and may not be
+            // written by the parent.
+            for child_port in child_ports.iter_mut() {
+                if child_port.dir != PortDir::Out {
+                    continue;
+                }
+                let net_name = format!("{}_{}", verilog_name, child_port.name);
+                self.declare_signal(
+                    &net_name,
+                    None,
+                    child_port.ty.clone(),
+                    SignalKind::Wire,
+                    Some(span.clone()),
+                )?;
+                let signal = self.cur.signal_by_name[&net_name];
+                self.claim_or_report(signal, None, Owner::Instance(index), &span)?;
+                child_port.parent_signal = Some(signal);
             }
-            let net_name = format!("{}_{}", field.name, child_port.name);
-            let net_span = span.clone();
-            self.declare_signal(
-                &net_name,
-                None,
-                child_port.ty.clone(),
-                SignalKind::Wire,
-                Some(net_span),
-            )?;
-            let signal = self.cur.signal_by_name[&net_name];
-            self.claim_or_report(signal, None, Owner::Instance(index), &span)?;
-            child_port.parent_signal = Some(signal);
-            let _ = port_index;
+
+            self.cur.instances.push(InstanceBuild {
+                field: display_name,
+                verilog_name,
+                module_source_name: child.name.clone(),
+                module_verilog_name: child_verilog_name.clone(),
+                params: params.clone(),
+                source: span.clone(),
+                child_ports,
+                connections: vec![None; port_count],
+                read_outputs: HashSet::new(),
+            });
         }
 
-        let connections = vec![None; child_ports.len()];
-        self.cur.instances.push(InstanceBuild {
-            field: field.name.clone(),
-            verilog_name: field.name.clone(),
-            module_source_name: child.name.clone(),
-            module_verilog_name: child_verilog_name,
-            params,
-            source: span,
-            child_ports,
-            connections,
-            read_outputs: HashSet::new(),
-        });
-        self.cur.instance_by_field.insert(field.name.clone(), index);
+        let entry = if count == 1 {
+            FieldInstances::Single(first)
+        } else {
+            FieldInstances::Array {
+                first,
+                len: u32::try_from(count).unwrap_or(u32::MAX),
+            }
+        };
+        self.cur.instance_by_field.insert(field.name.clone(), entry);
         Ok(())
     }
 
@@ -1867,5 +2002,28 @@ mod tests {
             entries_of(&merged, signal),
             vec![(0, 2, vec![read_of(2, 0, 1), read_of(1, 0, 1)])]
         );
+    }
+}
+
+/// Replaces the loop variable of a build-time `for` with its literal value.
+struct Subst<'a> {
+    name: &'a str,
+    value: u64,
+}
+
+impl syn::visit_mut::VisitMut for Subst<'_> {
+    fn visit_expr_mut(&mut self, node: &mut syn::Expr) {
+        syn::visit_mut::visit_expr_mut(self, node);
+        let syn::Expr::Path(path) = node else {
+            return;
+        };
+        if !path.path.is_ident(self.name) {
+            return;
+        }
+        let literal = syn::LitInt::new(&self.value.to_string(), proc_macro2::Span::call_site());
+        *node = syn::Expr::Lit(syn::ExprLit {
+            attrs: Vec::new(),
+            lit: syn::Lit::Int(literal),
+        });
     }
 }

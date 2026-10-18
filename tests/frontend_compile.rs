@@ -960,3 +960,107 @@ impl Hardware for Bits {
         compiled.verilog
     );
 }
+
+/// `#[instance] cells: [Xor1; 4]` is four instances, each with its own name and
+/// its own parent-side nets; `cells[i].port` selects one of them at build time.
+#[test]
+fn instance_array_is_one_instance_per_element() {
+    let source = r#"
+#[hardware_instance]
+struct Xor1 {
+    #[In] a: bool,
+    #[In] b: bool,
+    #[Out] s: bool,
+}
+
+impl Hardware for Xor1 {
+    fn run(&mut self) {
+        self.s = self.a ^ self.b;
+    }
+}
+
+#[hardware_instance]
+struct Bank4 {
+    #[In] a: U<4>,
+    #[In] b: U<4>,
+    #[Out] s: U<4>,
+    #[instance] cells: [Xor1; 4],
+}
+
+impl Hardware for Bank4 {
+    fn run(&mut self) {
+        for i in 0..4 {
+            self.cells[i].a = self.a[i];
+            self.cells[i].b = self.b[i];
+            self.s[i] = self.cells[i].s;
+        }
+    }
+}
+"#;
+    let compiled = compile(source, "bank.shy.rs", "Bank4").expect("instance array compiles");
+    let verilog = &compiled.verilog;
+
+    for index in 0..4 {
+        assert!(
+            verilog.contains(&format!("Xor1 cells__{index} (")),
+            "element {index} is its own instance:\n{verilog}"
+        );
+        assert!(
+            verilog.contains(&format!("cells__{index}_s")),
+            "element {index} has its own output net"
+        );
+    }
+    assert!(verilog.contains(".a(a[2])"), "element 2 sees a[2]");
+    assert!(verilog.contains(".b(b[3])"), "element 3 sees b[3]");
+
+    // The instance array is one field with four children in the metadata too.
+    let children: Vec<&str> = compiled
+        .design()
+        .top()
+        .instances
+        .iter()
+        .map(|instance| instance.verilog_name.as_str())
+        .collect();
+    assert_eq!(children, vec!["cells__0", "cells__1", "cells__2", "cells__3"]);
+}
+
+/// An instance index has to be known while compiling: no wire can select a child.
+#[test]
+fn instance_index_must_be_a_build_time_constant() {
+    let source = r#"
+#[hardware_instance]
+struct Xor1 {
+    #[In] a: bool,
+    #[In] b: bool,
+    #[Out] s: bool,
+}
+
+impl Hardware for Xor1 {
+    fn run(&mut self) {
+        self.s = self.a ^ self.b;
+    }
+}
+
+#[hardware_instance]
+struct Bank2 {
+    #[In] a: U<2>,
+    #[In] pick: U<1>,
+    #[Out] s: bool,
+    #[instance] cells: [Xor1; 2],
+}
+
+impl Hardware for Bank2 {
+    fn run(&mut self) {
+        self.cells[self.pick].a = self.a[0];
+        self.cells[self.pick].b = self.a[1];
+        self.s = self.cells[self.pick].s;
+    }
+}
+"#;
+    let error = compile(source, "bank.shy.rs", "Bank2").expect_err("a run-time index is refused");
+    let message = error.to_string();
+    assert!(
+        message.contains("not a constant") || message.contains("constant"),
+        "the diagnostic says the index must be build-time: {message}"
+    );
+}
