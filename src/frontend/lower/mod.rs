@@ -133,9 +133,9 @@ struct ChildPort {
 #[derive(Clone, Debug)]
 struct ProcessRecord {
     comb: bool,
-    /// Dependencies of this process: the read they come from (with its bit range)
-    /// and the signal it drives.
-    edges: Vec<(ReadRef, SignalId)>,
+    /// Dependencies of this process: the read they come from (with its bit
+    /// range), the signal it drives, and the bits it drives.
+    edges: Vec<(ReadRef, SignalId, u32, u32)>,
 }
 
 /// The module currently being built.
@@ -218,7 +218,7 @@ struct ProcCtx {
     guard_reads: Vec<ReadRef>,
     /// Dependencies collected while lowering: the read (with its bit range) and
     /// the signal it feeds.
-    edges: Vec<(ReadRef, SignalId)>,
+    edges: Vec<(ReadRef, SignalId, u32, u32)>,
     /// Reads that touched a bit this process had not assigned yet. At the end of
     /// the process they are intersected with the bits it drives: a read of a bit
     /// this same process drives is its own output, which is a feedback loop.
@@ -1743,14 +1743,21 @@ impl Compiler {
 
         // Combinational loop detection and cross-module dependency analysis.
         let graph = self.build_graph(&build);
-        if let Some(cycle) = graph.find_cycle() {
+        if let Some(cycle) = graph.find_bit_cycle() {
             let names: Vec<String> = cycle
                 .iter()
-                .map(|id| build.signal(*id).name.clone())
+                .map(|(signal, bit)| {
+                    let signal = build.signal(*signal);
+                    if signal.width() > 1 {
+                        format!("{}[{}]", signal.name, bit)
+                    } else {
+                        signal.name.clone()
+                    }
+                })
                 .collect();
             let span = cycle
                 .iter()
-                .find_map(|id| build.drive_span.get(id).cloned())
+                .find_map(|(signal, _)| build.drive_span.get(signal).cloned())
                 .unwrap_or_else(|| module_source.clone());
             return self.err(
                 codes::COMB_LOOP,
@@ -1872,11 +1879,12 @@ impl Compiler {
             if !record.comb {
                 continue;
             }
-            for (read, to) in &record.edges {
+            for (read, to, lo, hi) in &record.edges {
                 if self.cut_by_register(build, *read) {
                     continue;
                 }
                 graph.add_edge(read.signal, *to);
+                graph.add_bit_edge((read.signal, read.lo, read.hi), (*to, *lo, *hi));
             }
         }
 
@@ -1892,7 +1900,14 @@ impl Compiler {
                     hi,
                 }];
                 for read in collect_read_refs(value, build) {
-                    resolve_wiring_read(&drivers, read, target.signal(), &mut stack, &mut graph);
+                    resolve_wiring_read(
+                        &drivers,
+                        read,
+                        target.signal(),
+                        (lo, hi),
+                        &mut stack,
+                        &mut graph,
+                    );
                 }
             }
         }
@@ -1928,6 +1943,10 @@ impl Compiler {
                             continue;
                         }
                         graph.add_edge(read.signal, net);
+                        graph.add_bit_edge(
+                            (read.signal, read.lo, read.hi),
+                            (net, 0, build.signal(net).width()),
+                        );
                     }
                 }
             }

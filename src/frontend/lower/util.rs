@@ -122,6 +122,7 @@ pub(super) fn resolve_wiring_read(
     drivers: &[WiringDriver],
     read: ReadRef,
     target: SignalId,
+    target_range: (u32, u32),
     stack: &mut Vec<ReadRef>,
     graph: &mut DependencyGraph,
 ) {
@@ -132,6 +133,10 @@ pub(super) fn resolve_wiring_read(
 
     if covering.is_empty() {
         graph.add_edge(read.signal, target);
+        graph.add_bit_edge(
+            (read.signal, read.lo, read.hi),
+            (target, target_range.0, target_range.1),
+        );
         return;
     }
 
@@ -147,11 +152,15 @@ pub(super) fn resolve_wiring_read(
         };
         if stack.contains(&driver_range) {
             graph.add_edge(read.signal, target);
+            graph.add_bit_edge(
+                (read.signal, read.lo, read.hi),
+                (target, target_range.0, target_range.1),
+            );
             continue;
         }
         stack.push(driver_range);
         for nested in &driver.reads {
-            resolve_wiring_read(drivers, *nested, target, stack, graph);
+            resolve_wiring_read(drivers, *nested, target, target_range, stack, graph);
         }
         stack.pop();
     }
@@ -160,6 +169,10 @@ pub(super) fn resolve_wiring_read(
         // Not every bit of the read is driven by the wiring, so it also reads
         // the signal's value from outside.
         graph.add_edge(read.signal, target);
+        graph.add_bit_edge(
+            (read.signal, read.lo, read.hi),
+            (target, target_range.0, target_range.1),
+        );
     }
 }
 

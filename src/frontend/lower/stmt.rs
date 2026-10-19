@@ -1548,12 +1548,15 @@ impl Compiler {
         //
         // Every arm resolves the same sources, so the dependencies are recorded
         // once instead of once per leaf.
+        // A run-time index can land on any element, so the dependency covers the
+        // whole signal.
+        let write_width = self.cur.signal(write.signal).width();
         for source in &expansion.sources {
             self.proc
                 .as_mut()
                 .expect("process context")
                 .edges
-                .push((*source, write.signal));
+                .push((*source, write.signal, 0, write_width));
         }
         // Provenance is tracked per assignment in the default combinational process
         // only: a sequential process reads the old value of everything it writes,
@@ -1739,7 +1742,7 @@ impl Compiler {
             .provenance
             .write(ReadRef { signal, lo, hi }, sources.clone());
         for source in sources {
-            context.edges.push((source, signal));
+            context.edges.push((source, signal, lo, hi));
         }
     }
 

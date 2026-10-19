@@ -242,3 +242,61 @@ fn the_committed_function_example_compiles_and_runs() {
     // The second call gets its own instance and its own output nets.
     assert!(compiled.verilog.contains(".out1(Adder4__3_out1)"));
 }
+
+/// A carry chain through a loop: each iteration reads `cin[i]` and writes
+/// `cin[i + 1]`. The bits are disjoint, so this is not a combinational loop —
+/// a signal-level graph would call it one.
+#[test]
+fn a_carry_chain_through_a_loop_is_not_a_loop() {
+    let source = r#"
+#[hardware_instance]
+fn Fadd(a: bool, b: bool, cin: bool) -> (bool, bool) {
+    let t: bool = a ^ b;
+    (t ^ cin, (a & b) | (t & cin))
+}
+
+#[hardware_instance]
+fn Adder4(a: uint<4>, b: uint<4>, sub: bool) -> (uint<4>, bool, bool) {
+    let mut cin: [bool; 5] = [false; 5];
+    let mut sum: uint<4> = 0;
+    cin[0] = sub;
+    for i in 0..4 {
+        let (sb, co) = Fadd(a[i], b[i] ^ sub, cin[i]);
+        sum[i] = sb;
+        cin[i + 1] = co;
+    }
+    (sum, cin[4], cin[4] ^ cin[3])
+}
+
+#[hardware_instance]
+struct Top {
+    #[In] a: uint<4>,
+    #[In] b: uint<4>,
+    #[In] sub: bool,
+    #[Out] s: uint<4>,
+    #[Out] c: bool,
+    #[Out] v: bool,
+}
+
+impl Hardware for Top {
+    fn run(&mut self) {
+        let (sum, cout, overflow) = Adder4(a, b, sub);
+        s = sum;
+        c = cout;
+        v = overflow;
+    }
+}
+"#;
+    let compiled = compile(source, "carry.shy.rs", "Top").expect("a carry chain is not a loop");
+    let verilog = &compiled.verilog;
+
+    // Every stage is its own instance, chained through the carry bits.
+    for stage in 0..4 {
+        assert!(
+            verilog.contains(&format!(".cin(cin[{stage}])")),
+            "stage {stage} takes cin[{stage}]:\n{verilog}"
+        );
+    }
+    assert!(verilog.contains("cin[0] = sub;"));
+    assert!(verilog.contains("cin[4] = "));
+}
