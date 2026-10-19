@@ -97,6 +97,7 @@ mod analysis;
 mod consteval;
 mod lower;
 mod meta;
+mod outline;
 mod parse;
 mod verilog;
 
@@ -106,6 +107,7 @@ pub use mir::{
     LValue, Module, Param, Port, PortDir, Process, ProcessKind, ResetSpec, Signal, SignalId,
     SignalKind, SignalScope, Stmt, StructTy, Ty, TyField, UnOp,
 };
+pub use outline::{concrete_instances, declared_instances};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -217,6 +219,7 @@ pub fn load_design(source_path: &Path) -> Result<LoadedDesign, Diagnostics> {
     let mut stack: Vec<PathBuf> = Vec::new();
     let mut parsed = parse::ParsedFile {
         hw: Vec::new(),
+        functions: Vec::new(),
         data: HashMap::new(),
         enums: HashMap::new(),
         impls: HashMap::new(),
@@ -348,6 +351,18 @@ fn load_one(
         merge_name(type_name, &span, parsed, declared, diagnostics, |parsed| {
             parsed.enums.insert(type_name.clone(), item.clone());
         });
+    }
+    // Functions share the struct/enum namespace, so a call is never ambiguous
+    // with a type. Appending keeps the declaration order of the load.
+    for function in &file.functions {
+        merge_name(
+            &function.name,
+            &function.span,
+            parsed,
+            declared,
+            diagnostics,
+            |parsed| parsed.functions.push(function.clone()),
+        );
     }
     for (struct_name, implementation) in &file.impls {
         if let Some(existing) = parsed.impls.get(struct_name) {

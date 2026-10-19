@@ -2,6 +2,12 @@
 
 use shyhdl::*;
 
+// The declared field types are real Rust types in every build, so the types a
+// module names are imported here like any other. The frontend merges all files
+// into one namespace and ignores `use`.
+use crate::datapath::Datapath;
+use crate::select::{EnumRouter, Level, Op};
+
 #[hardware_instance]
 pub struct TourTop {
     #[In]

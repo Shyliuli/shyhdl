@@ -7,3 +7,6 @@ description = "A small system split across Rust modules, driven from main"
 
 [dependencies]
 shyhdl = { path = "../.." }
+
+[lints]
+workspace = true

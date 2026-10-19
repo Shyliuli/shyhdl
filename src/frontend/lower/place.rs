@@ -103,10 +103,13 @@ pub(super) fn decompose_place(
     match expr {
         syn::Expr::Field(field) => {
             let (is_self, name, mut path) = decompose_place(&field.base)?;
-            let syn::Member::Named(member) = &field.member else {
-                return Err("tuple field access is not supported".to_string());
+            // A tuple field is `.0`, `.1`, ...; a tuple type names its fields
+            // the same way, so one `Component::Field` covers both.
+            let member = match &field.member {
+                syn::Member::Named(member) => member.to_string(),
+                syn::Member::Unnamed(index) => index.index.to_string(),
             };
-            path.push(Component::Field(member.to_string()));
+            path.push(Component::Field(member));
             Ok((is_self, name, path))
         }
         syn::Expr::Index(index) => {
@@ -232,7 +235,34 @@ pub(super) fn pattern_name(pat: &syn::Pat) -> Result<(String, Option<&syn::Type>
             _ => Err("only a plain name can be declared here".to_string()),
         },
         syn::Pat::Wild(_) => Err("a hardware signal needs a name".to_string()),
+        syn::Pat::Tuple(tuple) if tuple.elems.is_empty() => {
+            Err("the unit pattern `()` has no bits; bind a name instead".to_string())
+        }
         other => Err(format!("unsupported pattern: {}", describe_pat(other))),
+    }
+}
+
+/// Split a `let` pattern into its pattern and its type annotation.
+///
+/// `let (a, b): (uint<4>, uint<8>) = ...` writes the annotation around the
+/// whole pattern, so a destructuring pattern has to peel it off first.
+pub(super) fn split_let_pattern(pat: &syn::Pat) -> (&syn::Pat, Option<&syn::Type>) {
+    match pat {
+        syn::Pat::Type(typed) => (&typed.pat, Some(&typed.ty)),
+        other => (other, None),
+    }
+}
+
+/// The type as it is spelled in the source, for a tuple's descriptive name.
+///
+/// A struct or an enum contributes its own name (a nested tuple's name is
+/// already `(...)`), so a tuple type reads `((uint<4>, bool), uint<8>)` rather
+/// than repeating a width in the middle of a type name.
+fn type_spelling(ty: &Ty) -> String {
+    match ty {
+        Ty::Struct(strukt) => strukt.name.clone(),
+        Ty::Array { element, len } => format!("[{}; {len}]", type_spelling(element)),
+        other => other.describe(),
     }
 }
 
@@ -362,120 +392,7 @@ impl Compiler {
                     "`self` must be followed by a field name",
                 ));
             };
-
-            if let Some(signal) = self.cur.signal_by_name.get(&first).copied() {
-                let signal_ty = self.cur.signal(signal).ty.clone();
-                if let Some(dynamic) = self.dynamic_write_place(signal, &path, &signal_ty, &span)? {
-                    return Ok(dynamic);
-                }
-                let (range, ty) = self.place_range(&signal_ty, &path, &span)?;
-                return Ok(Place::Signal { signal, range, ty });
-            }
-            if let Some(entry) = self.cur.instance_by_field.get(&first).copied() {
-                // An array of instances is indexed by a build-time constant:
-                // there is no hardware that could select an instance at run time.
-                let instance = match entry {
-                    FieldInstances::Single(index) => index,
-                    FieldInstances::Array { first: base, len } => {
-                        let Some(Component::Bits(index)) = path.first().cloned() else {
-                            return Err(Diagnostic::error(
-                                codes::UNSUPPORTED,
-                                Some(span),
-                                format!(
-                                    "`self.{first}` is an array of {len} instances: use a build-time constant index, for example `self.{first}[0].<port>`"
-                                ),
-                            ));
-                        };
-                        path.remove(0);
-                        let value = consteval::eval(&index, &self.cur.env).map_err(|message| {
-                            Diagnostic::error(codes::NOT_CONSTANT, Some(span.clone()), message)
-                        })?;
-                        if value >= u64::from(len) {
-                            return Err(Diagnostic::error(
-                                codes::OUT_OF_RANGE,
-                                Some(span),
-                                format!(
-                                    "instance {value} is out of range for `{first}`, which has {len} instances (valid: 0..{})",
-                                    len.saturating_sub(1)
-                                ),
-                            ));
-                        }
-                        base + value as usize
-                    }
-                };
-                let Some(Component::Field(port_name)) = path.first().cloned() else {
-                    return Err(Diagnostic::error(
-                        codes::UNSUPPORTED,
-                        Some(span),
-                        format!("`self.{first}` is a child instance: refer to one of its ports"),
-                    ));
-                };
-                path.remove(0);
-                let Some(port) = self.cur.instances[instance]
-                    .child_ports
-                    .iter()
-                    .position(|candidate| candidate.name == port_name)
-                else {
-                    let available: Vec<String> = self.cur.instances[instance]
-                        .child_ports
-                        .iter()
-                        .map(|port| port.name.clone())
-                        .collect();
-                    let field = self.cur.instances[instance].field.clone();
-                    return Err(Diagnostic::error(
-                        codes::UNKNOWN_NAME,
-                        Some(span),
-                        format!("instance `{field}` has no port `{port_name}`"),
-                    )
-                    .with_note(
-                        format!("ports of `{field}`: {}", available.join(", ")),
-                        None,
-                    ));
-                };
-                let dir = self.cur.instances[instance].child_ports[port].dir;
-                if dir.is_input() {
-                    if !path.is_empty() {
-                        return Err(Diagnostic::error(
-                            codes::UNSUPPORTED,
-                            Some(span),
-                            format!("`{port_name}` is a child input: connect the whole value"),
-                        ));
-                    }
-                    let _ = writing;
-                    return Ok(Place::ChildInput { instance, port });
-                }
-                let port_ty = self.cur.instances[instance].child_ports[port].ty.clone();
-                // A child output is driven by the instance, so a run-time
-                // element write to it is reported as what it is: the port is not
-                // the parent's to write. The element itself is not resolved.
-                if !self.run_time_indices(&path).is_empty() {
-                    return Ok(Place::ChildOutput {
-                        instance,
-                        port,
-                        range: None,
-                        ty: port_ty,
-                    });
-                }
-                let (range, ty) = self.place_range(&port_ty, &path, &span)?;
-                return Ok(Place::ChildOutput {
-                    instance,
-                    port,
-                    range,
-                    ty,
-                });
-            }
-            let fields: Vec<String> = self.cur.signal_by_name.keys().cloned().collect();
-            let mut diagnostic = Diagnostic::error(
-                codes::UNKNOWN_NAME,
-                Some(span),
-                format!("`self.{first}` is not a field of this module"),
-            );
-            if !fields.is_empty() {
-                let mut fields = fields;
-                fields.sort();
-                diagnostic = diagnostic.with_note(format!("fields: {}", fields.join(", ")), None);
-            }
-            return Err(diagnostic);
+            return self.resolve_field_place(&first, &mut path, &span, writing, true);
         }
 
         let Some(name) = base_name else {
@@ -496,23 +413,142 @@ impl Compiler {
                 return Ok(Place::Signal { signal, range, ty });
             }
         }
-        if let Some(signal) = self.cur.signal_by_name.get(&name).copied() {
+        // A bare field name is the implicit `self.<name>`: a module field or a
+        // child instance is reachable without `self.`, after locals and
+        // parameters have had their chance.
+        self.resolve_field_place(&name, &mut path, &span, writing, false)
+    }
+
+    /// Resolve `self.<first>` (or the implicit bare form) plus the remaining
+    /// place steps.
+    ///
+    /// `explicit_self` only decides how a failure is worded: the resolution
+    /// itself is identical for `self.x` and the implicit `x`.
+    fn resolve_field_place(
+        &mut self,
+        first: &str,
+        path: &mut Vec<Component>,
+        span: &SourceSpan,
+        writing: bool,
+        explicit_self: bool,
+    ) -> Result<Place, Diagnostic> {
+        let prefix = if explicit_self {
+            format!("self.{first}")
+        } else {
+            first.to_string()
+        };
+        if let Some(signal) = self.cur.signal_by_name.get(first).copied() {
             let signal_ty = self.cur.signal(signal).ty.clone();
-            if let Some(dynamic) = self.dynamic_write_place(signal, &path, &signal_ty, &span)? {
+            if let Some(dynamic) = self.dynamic_write_place(signal, path, &signal_ty, span)? {
                 return Ok(dynamic);
             }
-            let (range, ty) = self.place_range(&signal_ty, &path, &span)?;
+            let (range, ty) = self.place_range(&signal_ty, path, span)?;
             return Ok(Place::Signal { signal, range, ty });
         }
-
-        let mut diagnostic = Diagnostic::error(
-            codes::UNKNOWN_NAME,
-            Some(span),
-            format!("unknown name `{name}`"),
-        );
-        if self.cur.signal_by_name.contains_key(&name) {
-            diagnostic =
-                diagnostic.with_note(format!("write `self.{name}` to reach the field"), None);
+        if let Some(entry) = self.cur.instance_by_field.get(first).copied() {
+            // An array of instances is indexed by a build-time constant:
+            // there is no hardware that could select an instance at run time.
+            let instance = match entry {
+                FieldInstances::Single(index) => index,
+                FieldInstances::Array { first: base, len } => {
+                    let Some(Component::Bits(index)) = path.first().cloned() else {
+                        return Err(Diagnostic::error(
+                            codes::UNSUPPORTED,
+                            Some(span.clone()),
+                            format!(
+                                "`{prefix}` is an array of {len} instances: use a build-time constant index, for example `{prefix}[0].<port>`"
+                            ),
+                        ));
+                    };
+                    path.remove(0);
+                    let value = consteval::eval(&index, &self.cur.env).map_err(|message| {
+                        Diagnostic::error(codes::NOT_CONSTANT, Some(span.clone()), message)
+                    })?;
+                    if value >= u64::from(len) {
+                        return Err(Diagnostic::error(
+                            codes::OUT_OF_RANGE,
+                            Some(span.clone()),
+                            format!(
+                                "instance {value} is out of range for `{first}`, which has {len} instances (valid: 0..{})",
+                                len.saturating_sub(1)
+                            ),
+                        ));
+                    }
+                    base + value as usize
+                }
+            };
+            let Some(Component::Field(port_name)) = path.first().cloned() else {
+                return Err(Diagnostic::error(
+                    codes::UNSUPPORTED,
+                    Some(span.clone()),
+                    format!("`{prefix}` is a child instance: refer to one of its ports"),
+                ));
+            };
+            path.remove(0);
+            let Some(port) = self.cur.instances[instance]
+                .child_ports
+                .iter()
+                .position(|candidate| candidate.name == port_name)
+            else {
+                let available: Vec<String> = self.cur.instances[instance]
+                    .child_ports
+                    .iter()
+                    .map(|port| port.name.clone())
+                    .collect();
+                let field = self.cur.instances[instance].field.clone();
+                return Err(Diagnostic::error(
+                    codes::UNKNOWN_NAME,
+                    Some(span.clone()),
+                    format!("instance `{field}` has no port `{port_name}`"),
+                )
+                .with_note(
+                    format!("ports of `{field}`: {}", available.join(", ")),
+                    None,
+                ));
+            };
+            let dir = self.cur.instances[instance].child_ports[port].dir;
+            if dir.is_input() {
+                if !path.is_empty() {
+                    return Err(Diagnostic::error(
+                        codes::UNSUPPORTED,
+                        Some(span.clone()),
+                        format!("`{port_name}` is a child input: connect the whole value"),
+                    ));
+                }
+                let _ = writing;
+                return Ok(Place::ChildInput { instance, port });
+            }
+            let port_ty = self.cur.instances[instance].child_ports[port].ty.clone();
+            // A child output is driven by the instance, so a run-time
+            // element write to it is reported as what it is: the port is not
+            // the parent's to write. The element itself is not resolved.
+            if !self.run_time_indices(path).is_empty() {
+                return Ok(Place::ChildOutput {
+                    instance,
+                    port,
+                    range: None,
+                    ty: port_ty,
+                });
+            }
+            let (range, ty) = self.place_range(&port_ty, path, span)?;
+            return Ok(Place::ChildOutput {
+                instance,
+                port,
+                range,
+                ty,
+            });
+        }
+        let mut fields: Vec<String> = self.cur.signal_by_name.keys().cloned().collect();
+        fields.extend(self.cur.instance_by_field.keys().cloned());
+        fields.sort();
+        let message = if explicit_self {
+            format!("`self.{first}` is not a field of this module")
+        } else {
+            format!("unknown name `{first}`")
+        };
+        let mut diagnostic = Diagnostic::error(codes::UNKNOWN_NAME, Some(span.clone()), message);
+        if !fields.is_empty() {
+            diagnostic = diagnostic.with_note(format!("fields: {}", fields.join(", ")), None);
         }
         Err(diagnostic)
     }
@@ -816,6 +852,9 @@ impl Compiler {
         if let syn::Type::Array(array) = ty {
             return self.resolve_array_type(array, span);
         }
+        if let syn::Type::Tuple(tuple) = ty {
+            return self.resolve_tuple_type(tuple, span);
+        }
         let syn::Type::Path(path) = ty else {
             return Err(Diagnostic::error(
                 codes::BAD_TYPE,
@@ -978,6 +1017,70 @@ impl Compiler {
         let len = consteval::eval(&array.len, &self.cur.env)
             .map_err(|message| Diagnostic::error(codes::BAD_TYPE, Some(span.clone()), message))?;
         self.array_type(element, len, &span)
+    }
+
+    /// `(T, U, ...)`: a tuple type, laid out as a struct whose fields are named
+    /// `0`, `1`, ... and packed most significant first.
+    ///
+    /// The unit type `()` is refused: a value with no bits has no hardware
+    /// meaning here, and every signal must have a width.
+    fn resolve_tuple_type(
+        &mut self,
+        tuple: &syn::TypeTuple,
+        span: SourceSpan,
+    ) -> Result<Ty, Diagnostic> {
+        if tuple.elems.is_empty() {
+            return Err(Diagnostic::error(
+                codes::BAD_TYPE,
+                Some(span),
+                "the unit type `()` has no bits and is not a hardware value",
+            ));
+        }
+        let mut elements = Vec::new();
+        for element in &tuple.elems {
+            elements.push(self.resolve_type(element, span.clone())?);
+        }
+        self.tuple_type(elements, &span)
+    }
+
+    /// The tuple type `elements` make.
+    ///
+    /// A tuple reuses the struct layout: the fields are named after their
+    /// position and the type's name is descriptive, so widths, metadata, field
+    /// access and the debugger already know what to do with it.
+    pub(super) fn tuple_type(
+        &self,
+        elements: Vec<Ty>,
+        span: &SourceSpan,
+    ) -> Result<Ty, Diagnostic> {
+        let name = format!(
+            "({})",
+            elements
+                .iter()
+                .map(type_spelling)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let fields: Vec<(String, Ty)> = elements
+            .into_iter()
+            .enumerate()
+            .map(|(index, ty)| (index.to_string(), ty))
+            .collect();
+        let strukt = StructTy::from_fields(name, fields)
+            .map_err(|message| Diagnostic::error(codes::BAD_TYPE, Some(span.clone()), message))?;
+        let total = u64::from(strukt.total);
+        if total > consteval::MAX_WIDTH {
+            return Err(Diagnostic::error(
+                codes::BAD_TYPE,
+                Some(span.clone()),
+                format!(
+                    "`{}` is {total} bits, more than the maximum supported width of {} bits",
+                    Ty::Struct(strukt).describe(),
+                    consteval::MAX_WIDTH
+                ),
+            ));
+        }
+        Ok(Ty::Struct(strukt))
     }
 
     /// The array type `len` elements of `element` make.

@@ -92,7 +92,8 @@ fn wraps() {
 | --- | --- |
 | 模块 | `#[hardware_instance] struct`、`#[instance]` 子实例、实例数组 `[Child; N]`、赋值连线、构建期常量泛型 |
 | 数据类型 | `bool`、`U<N>` / `uint<N>`、`I<N>` / `int<N>`、`struct`、带 payload 的 `enum`、`Option`、`Result`、`[T; N]` |
-| 组合过程 | `run` 中的 `let`、赋值、`if`、`match`、构建期 `for`，按源码顺序求值 |
+| 组合过程 | `run` 中的 `let`、解构绑定、赋值、`if`、`match`、构建期 `for`，按源码顺序求值；裸字段名等价于 `self.字段` |
+| 组合函数 | `#[hardware_instance] fn f(a: uint<4>) -> (uint<4>, bool)`，函数即组合实例，调用点 `let (x, y) = f(v);` 实例化一次 |
 | 时序过程 | 事件臂 `#[Pedge]` / `#[Nedge]`，最后一个臂是时钟，状态赋值非阻塞 |
 | 运算 | 等宽算术与回绕、位运算、`>>`（有符号算术右移）、切片 `x[lo..hi]`、`get(i)`、`zext` / `sext` / `trunc`、等宽 `as` |
 | 匹配 | 语句位置与值位置的 `match`、变体与 payload 模式、`or` 模式、守卫、穷尽性检查、范围 `0x10..=0x1F`、位通配 `mask!(0b11??1111)` 与 `mask!("11??1111")`；纯位模式生成 `case`/`casez` |
@@ -141,6 +142,25 @@ if std::env::args().any(|arg| arg == "--nvboard") {
 `pkg-config` 能找到即可）。首次运行会把 `vendor/nvboard` 编译成 `libnvboard.a` 缓存到临时目录，
 之后直接复用。没有这个 feature 时 `board` 子命令只提示如何重新构建，其余命令不受影响。
 
+## 编辑器支持
+
+硬件结构体在所有构建里都带真实字段，只去掉 rustc 不认识的 `#[In]`、`#[Out]`、`#[instance]`
+属性，所以字段类型就是普通 Rust 类型，跨模块引用时要像普通 Rust 一样写 `use`。为了让编辑器
+看到 `run` 的函数体，宏额外生成一个只在 `cfg(rust_analyzer)` 下可见的分支；rust-analyzer 会
+启用这个条件。因此：
+
+- `self.` 之后可以补全 `#[hardware_instance]` 结构体的字段，并跳转到字段声明；
+- `run` 函数体按 Rust 语法解析，括号、关键字与名称拼写错误会即时提示；
+- 编辑器分支会把 `as U<N>` 改写成 `U::<N>::from(..)`、把独立的整数字面量改写成
+  `__bits(..)`、把位选改写成 `__bits` / `__bit`、把字面量模式改写成守卫链，所以常见的
+  DSL 写法在 rust-analyzer 里也能通过类型检查；
+- 仍然存在少量误报：字面量分支再参与运算（例如 `(match a { 0 => 1, _ => 2 }) + 3`）无法
+  推断类型，`always!` 的事件臂和 `mask!` 的位模式也不会被展开。最终语义以 `shyhdl check`
+  的诊断为准。
+
+这个分支依赖 `cfg(rust_analyzer)`；工作区的 `[workspace.lints.rust]` 已把该名称加入
+`check-cfg` 白名单，所以正常 `cargo build` 不会产生未知 cfg 警告。
+
 ## 文档
 
 - [docs/language.md](./docs/language.md)：语言参考（模块、过程、位宽、匹配、测试）
@@ -157,7 +177,11 @@ if std::env::args().any(|arg| arg == "--nvboard") {
   列、65536 个单元，以及总计 100 万次访问。
 - Verilator 后端是二态语义，不声称完整四态仿真。
 - Verilator 的 verilation kit 路径必须是 ASCII；ShyHDL 自身的源码与生成物支持中文路径。
-- 宏模式把程序中登记的所有条目拼成一份源码编译，多个设计若声明同名类型会冲突。
+- 宏模式把程序中登记的所有条目拼成一份源码编译，多个设计若声明同名类型会冲突；字段类型现在
+  是真实的 Rust 类型，跨模块引用时必须像普通 Rust 一样写 `use`。
+- `let` 不能解构 enum 的 payload（例如 `let Some(v) = o;`），请改用 `match`；元组模式里的
+  `..` 与 `@` 绑定也不支持。
+- 组合函数每次调用都会生成一个实例，没有内联优化；函数不能是时序逻辑，也不能递归。
 - `Debugger::new` 需要 `&RunResult` 和步长（例如 `ns(10)`）：端口与录制配对来自那次运行的 manifest，步长由调用方决定。
 
 ## 项目结构

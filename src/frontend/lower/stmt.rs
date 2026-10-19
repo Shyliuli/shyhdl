@@ -648,8 +648,12 @@ impl Compiler {
         out: &mut Vec<Stmt>,
     ) -> Result<(), ()> {
         let span = self.span(statement.span());
-        let (name, annotation) = match pattern_name(&local.pat) {
-            Ok(parts) => parts,
+        let (pattern, annotation) = split_let_pattern(&local.pat);
+        if is_destructuring_pattern(pattern) {
+            return self.lower_destructuring(pattern, annotation, local, out);
+        }
+        let name = match pattern_name(pattern) {
+            Ok((name, _)) => name,
             Err(message) => return self.err(codes::UNSUPPORTED, span, message),
         };
 
@@ -750,6 +754,369 @@ impl Compiler {
                 source: target_span,
             });
         }
+        Ok(())
+    }
+
+    /// A `let` whose pattern destructures a tuple or a struct.
+    ///
+    /// The initialiser is lowered once and stored in one hidden temporary; each
+    /// binding is then a slice of that temporary. Lowering it once matters: a
+    /// `match` or an `if` in the initialiser must not run once per binding.
+    ///
+    /// At the top level of `run` the bindings are module signals, exactly like a
+    /// plain `let` there; a nested `let` declares process locals.
+    fn lower_destructuring(
+        &mut self,
+        pattern: &syn::Pat,
+        annotation: Option<&syn::Type>,
+        local: &syn::Local,
+        out: &mut Vec<Stmt>,
+    ) -> Result<(), ()> {
+        let span = self.span(local.span());
+        let target_span = self.span_or_default(span.clone());
+        let init = local.init.as_ref();
+
+        // The pattern's type comes from the annotation, or from the initialiser
+        // when there is none. The initialiser is lowered exactly once.
+        let (ty, inferred) = match annotation {
+            Some(annotation) => {
+                let result = self.resolve_type(annotation, target_span.clone());
+                match self.soft(result) {
+                    Some(ty) => (ty, None),
+                    None => return Err(()),
+                }
+            }
+            None => {
+                let Some(init) = init else {
+                    return self.err(
+                        codes::BAD_TYPE,
+                        span,
+                        "this `let` needs a type annotation: there is no initialiser to infer the pattern's type from",
+                    );
+                };
+                let result = self.lower_expr_top(&init.expr, None);
+                let Some(value) = self.soft(result) else {
+                    return Err(());
+                };
+                (value.ty.clone(), Some(value))
+            }
+        };
+
+        let value = match inferred {
+            Some(value) => {
+                self.check_assign_width(&ty, None, &value, target_span.clone())?;
+                Some(value)
+            }
+            None => match init {
+                Some(init) => {
+                    let result = self.lower_expr_top(&init.expr, Some(&ty));
+                    let Some(value) = self.soft(result) else {
+                        return Err(());
+                    };
+                    self.check_assign_width(&ty, None, &value, target_span.clone())?;
+                    Some(value)
+                }
+                None => None,
+            },
+        };
+
+        let Some(value) = value else {
+            // No initialiser: the pattern only declares its bindings.
+            return self.bind_pattern(pattern, &ty, None, &mut Vec::new(), out);
+        };
+
+        // One hidden temporary holds the whole value, so the initialiser's
+        // statements stay in one place however many names the pattern binds.
+        let temp = match self.materialize(value, &target_span) {
+            Ok(signal) => signal,
+            Err(diagnostic) => return self.error(diagnostic),
+        };
+        self.drain_pending(out);
+        self.bind_pattern(pattern, &ty, Some(temp), &mut Vec::new(), out)
+    }
+
+    /// Bind one pattern against the value at `path` of `root_ty`.
+    ///
+    /// `temp` is the hidden temporary holding the whole value, when the `let`
+    /// has an initialiser; without one the bindings are only declared.
+    fn bind_pattern(
+        &mut self,
+        pattern: &syn::Pat,
+        root_ty: &Ty,
+        temp: Option<SignalId>,
+        path: &mut Vec<Component>,
+        out: &mut Vec<Stmt>,
+    ) -> Result<(), ()> {
+        let span = self
+            .span(pattern.span())
+            .unwrap_or_else(|| self.cur.struct_source.clone());
+        match pattern {
+            syn::Pat::Ident(ident) => {
+                if ident.subpat.is_some() {
+                    return self.err(
+                        codes::UNSUPPORTED,
+                        Some(span),
+                        "an `@` subpattern is not supported in a `let`",
+                    );
+                }
+                let name = ident.ident.to_string();
+                let (range, ty) = self.pattern_part(root_ty, path, &span)?;
+                let value = temp.map(|temp| self.range_expr(temp, range, &ty, span.clone()));
+                self.declare_binding(&name, ty, value, span, out)
+            }
+            syn::Pat::Wild(_) => Ok(()),
+            syn::Pat::Rest(_) => self.err(
+                codes::UNSUPPORTED,
+                Some(span),
+                "`..` is not a binding; a struct pattern may use it to ignore the remaining fields",
+            ),
+            syn::Pat::Paren(paren) => self.bind_pattern(&paren.pat, root_ty, temp, path, out),
+            // A type inside the pattern is redundant: the pattern's type is
+            // already known from the annotation or the initialiser.
+            syn::Pat::Type(typed) => self.bind_pattern(&typed.pat, root_ty, temp, path, out),
+            syn::Pat::Tuple(tuple) => {
+                if tuple.elems.is_empty() {
+                    return self.err(
+                        codes::BAD_TYPE,
+                        Some(span),
+                        "the unit pattern `()` has no bits; bind a name instead",
+                    );
+                }
+                if tuple
+                    .elems
+                    .iter()
+                    .any(|element| matches!(element, syn::Pat::Rest(_)))
+                {
+                    return self.err(
+                        codes::UNSUPPORTED,
+                        Some(span),
+                        "a `..` rest pattern is not supported in a tuple pattern; list every element",
+                    );
+                }
+                let (_, ty) = self.pattern_part(root_ty, path, &span)?;
+                let Ty::Struct(strukt) = &ty else {
+                    return self.err(
+                        codes::BAD_TYPE,
+                        Some(span),
+                        format!("cannot destructure {} as a tuple", ty.describe()),
+                    );
+                };
+                if !strukt.is_tuple() {
+                    return self.err(
+                        codes::BAD_TYPE,
+                        Some(span),
+                        format!(
+                            "cannot destructure {} as a tuple; write a struct pattern instead",
+                            ty.describe()
+                        ),
+                    );
+                }
+                if tuple.elems.len() != strukt.fields.len() {
+                    return self.err(
+                        codes::WIDTH_MISMATCH,
+                        Some(span),
+                        format!(
+                            "this tuple pattern has {} element(s), but {} has {}",
+                            tuple.elems.len(),
+                            ty.describe(),
+                            strukt.fields.len()
+                        ),
+                    );
+                }
+                for (index, element) in tuple.elems.iter().enumerate() {
+                    path.push(Component::Field(index.to_string()));
+                    let result = self.bind_pattern(element, root_ty, temp, path, out);
+                    path.pop();
+                    result?;
+                }
+                Ok(())
+            }
+            syn::Pat::Struct(strukt) => {
+                let (_, ty) = self.pattern_part(root_ty, path, &span)?;
+                let Ty::Struct(layout) = &ty else {
+                    if matches!(ty, Ty::Enum(_)) {
+                        return self.err(
+                            codes::UNSUPPORTED,
+                            Some(span),
+                            format!(
+                                "destructuring the payload of {} in a `let` is not supported: an enum variant is selected by `match`",
+                                ty.describe()
+                            ),
+                        );
+                    }
+                    return self.err(
+                        codes::BAD_TYPE,
+                        Some(span),
+                        format!("cannot destructure {} with a struct pattern", ty.describe()),
+                    );
+                };
+                if layout.is_tuple() {
+                    return self.err(
+                        codes::BAD_TYPE,
+                        Some(span),
+                        format!(
+                            "{} is a tuple; write a tuple pattern `(a, b)` instead",
+                            ty.describe()
+                        ),
+                    );
+                }
+                let mut bound: HashSet<String> = HashSet::new();
+                for field in &strukt.fields {
+                    let syn::Member::Named(member) = &field.member else {
+                        return self.err(
+                            codes::UNSUPPORTED,
+                            Some(span),
+                            "struct pattern fields need names",
+                        );
+                    };
+                    let name = member.to_string();
+                    if layout.fields.iter().all(|candidate| candidate.name != name) {
+                        let available: Vec<String> = layout
+                            .fields
+                            .iter()
+                            .map(|field| field.name.clone())
+                            .collect();
+                        let mut diagnostic = Diagnostic::error(
+                            codes::UNKNOWN_NAME,
+                            Some(span.clone()),
+                            format!("{} has no field `{name}`", ty.describe()),
+                        );
+                        diagnostic = diagnostic.with_note(
+                            format!("fields of `{}`: {}", layout.name, available.join(", ")),
+                            None,
+                        );
+                        return self.error(diagnostic);
+                    }
+                    bound.insert(name.clone());
+                    path.push(Component::Field(name));
+                    let result = self.bind_pattern(&field.pat, root_ty, temp, path, out);
+                    path.pop();
+                    result?;
+                }
+                if strukt.rest.is_none() {
+                    let missing: Vec<String> = layout
+                        .fields
+                        .iter()
+                        .filter(|field| !bound.contains(&field.name))
+                        .map(|field| field.name.clone())
+                        .collect();
+                    if !missing.is_empty() {
+                        return self.err(
+                            codes::DECLARATION,
+                            Some(span),
+                            format!(
+                                "this struct pattern does not bind field(s): {}; add `..` to ignore them",
+                                missing.join(", ")
+                            ),
+                        );
+                    }
+                }
+                Ok(())
+            }
+            syn::Pat::TupleStruct(tuple) => {
+                let name = tuple
+                    .path
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string())
+                    .unwrap_or_default();
+                let mut diagnostic = Diagnostic::error(
+                    codes::UNSUPPORTED,
+                    Some(span),
+                    format!(
+                        "destructuring `{name}(...)` in a `let` is not supported: an enum variant is selected by `match`"
+                    ),
+                );
+                diagnostic = diagnostic.with_note(
+                    "write `match value { ... }` and bind the payload in the arm",
+                    None,
+                );
+                self.error(diagnostic)
+            }
+            other => self.err(
+                codes::UNSUPPORTED,
+                Some(span),
+                format!("unsupported pattern in a `let`: {}", describe_pat(other)),
+            ),
+        }
+    }
+
+    /// The bit range and type of one step of a pattern, resolved against the
+    /// pattern's whole type.
+    fn pattern_part(
+        &mut self,
+        root_ty: &Ty,
+        path: &[Component],
+        span: &SourceSpan,
+    ) -> Result<(Option<(u32, u32)>, Ty), ()> {
+        match self.place_range(root_ty, path, span) {
+            Ok(parts) => Ok(parts),
+            Err(diagnostic) => self.error(diagnostic),
+        }
+    }
+
+    /// Declare one binding of a destructuring pattern and, when there is a
+    /// value, drive it from the hidden temporary.
+    ///
+    /// At the top level of `run` the binding is a module signal (the same rule a
+    /// plain `let` follows); nested it is a process local.
+    fn declare_binding(
+        &mut self,
+        name: &str,
+        ty: Ty,
+        value: Option<Expr>,
+        span: SourceSpan,
+        out: &mut Vec<Stmt>,
+    ) -> Result<(), ()> {
+        let signal = if self.proc_ref().at_run_top {
+            if self.cur.signal_by_name.contains_key(name)
+                || self.cur.instance_by_field.contains_key(name)
+            {
+                let mut diagnostic = Diagnostic::error(
+                    codes::NAME_COLLISION,
+                    Some(span),
+                    format!(
+                        "`{name}` is already a signal of this module, so this `let` cannot declare it again"
+                    ),
+                );
+                if self.cur.signal_by_name.contains_key(name) {
+                    diagnostic = diagnostic.with_note(
+                        format!(
+                            "a run-level `let` declares a module signal; rename the local (for example `{name}_v`)"
+                        ),
+                        None,
+                    );
+                }
+                return self.error(diagnostic);
+            }
+            self.declare_signal(
+                name,
+                Some(name.to_string()),
+                ty,
+                SignalKind::Wire,
+                Some(span.clone()),
+            )?
+        } else {
+            self.declare_local(name, ty, Some(span.clone()))?
+        };
+        let Some(value) = value else {
+            return Ok(());
+        };
+        let target = LValue::Signal {
+            signal,
+            range: None,
+            source: span.clone(),
+        };
+        let index = self.current_process();
+        self.claim_or_report(signal, None, Owner::Process(index), &span)?;
+        self.record_process_assign(&target, &value);
+        self.drain_pending(out);
+        out.push(Stmt::Assign {
+            target,
+            value,
+            nonblocking: false,
+            source: span,
+        });
         Ok(())
     }
 
@@ -2813,5 +3180,15 @@ impl crate::pattern::ConstResolver for ConstEnvResolver<'_> {
         self.env
             .get(&ident.to_string())
             .map(|value| u128::from(*value))
+    }
+}
+
+/// True for a `let` pattern that binds several names out of one value.
+fn is_destructuring_pattern(pat: &syn::Pat) -> bool {
+    match pat {
+        syn::Pat::Tuple(tuple) => !tuple.elems.is_empty(),
+        syn::Pat::TupleStruct(_) | syn::Pat::Struct(_) => true,
+        syn::Pat::Paren(paren) => is_destructuring_pattern(&paren.pat),
+        _ => false,
     }
 }

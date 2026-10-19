@@ -5,6 +5,11 @@
 //! which macro a block is written with (`always!`). Nothing is inferred
 //! from a plain `struct`.
 //!
+//! `#[hardware_instance]` marks a `struct` (one module) or a `fn` (one
+//! combinational function). A function's parameters are its inputs and its
+//! return type lists its outputs; its body is ordinary combinational DSL code
+//! and may not contain `always!`.
+//!
 //! A parse failure is reported exactly where `syn` found it. Because the DSL is
 //! Rust syntax, a few draft spellings cannot be parsed at all; those get a
 //! targeted hint instead of a bare "expected `,`" (see [`parse_error`]).
@@ -22,6 +27,8 @@ use crate::metadata::SourceSpan;
 pub(crate) struct ParsedFile {
     /// Hardware structs in declaration order.
     pub hw: Vec<HwStruct>,
+    /// Combinational hardware functions in declaration order.
+    pub functions: Vec<HwFunction>,
     /// Plain data structs by name; their layout is built on demand.
     pub data: HashMap<String, syn::ItemStruct>,
     /// Enums by name; their layout is built on demand.
@@ -89,6 +96,42 @@ pub(crate) struct HwField {
     pub span: SourceSpan,
 }
 
+/// A `#[hardware_instance]` function: one combinational function.
+///
+/// The parameters are the inputs and the return type lists the outputs, so a
+/// call reads as `let (w, o) = xxx(y, z);`. The body is an ordinary block; it
+/// is rejected at parse time if it contains an `always!` process.
+//
+// The lowering pass that reads these fields lands after this parse model, so
+// nothing in the crate consumes them yet.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct HwFunction {
+    /// Function name.
+    pub name: String,
+    /// Input parameters in declaration order.
+    pub params: Vec<HwFunctionParam>,
+    /// Declared return type. The tuple form `(uint<8>, bool)` lists the
+    /// outputs; a single non-tuple type is one output.
+    pub ret: syn::Type,
+    /// Body of the function.
+    pub body: syn::Block,
+    /// Where the function name was written.
+    pub span: SourceSpan,
+}
+
+/// One input parameter of a hardware function.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct HwFunctionParam {
+    /// Parameter name.
+    pub name: String,
+    /// Declared type, resolved later like a field type.
+    pub ty: syn::Type,
+    /// Where the parameter was declared.
+    pub span: SourceSpan,
+}
+
 /// The hardware implementation of one struct.
 #[derive(Debug, Clone)]
 pub(crate) struct HwImpl {
@@ -113,6 +156,7 @@ pub(crate) fn parse(source: &str, source_name: &str) -> Result<ParsedFile, Diagn
 
     let mut diagnostics = Diagnostics::new();
     let mut hardware_names: Vec<String> = Vec::new();
+    let mut function_names: Vec<String> = Vec::new();
     let mut data: HashMap<String, syn::ItemStruct> = HashMap::new();
     let mut enums: HashMap<String, syn::ItemEnum> = HashMap::new();
     let mut duplicate: Option<(String, SourceSpan)> = None;
@@ -158,6 +202,14 @@ pub(crate) fn parse(source: &str, source_name: &str) -> Result<ParsedFile, Diagn
                 span_in(source_name, item_enum.ident.span()),
                 DeclKind::Enum(Box::new(item_enum.clone())),
             ),
+            // `#[hardware_instance] fn` is a combinational function. A plain
+            // `fn` (for example a `#[hardware_test]`) is not a design item and
+            // is ignored here, as before.
+            syn::Item::Fn(item_fn) if has_hardware_instance(&item_fn.attrs) => (
+                item_fn.sig.ident.to_string(),
+                span_in(source_name, item_fn.sig.ident.span()),
+                DeclKind::Function,
+            ),
             _ => continue,
         };
         let fallback = || span.unwrap_or_else(|| fallback_span(source_name));
@@ -169,8 +221,12 @@ pub(crate) fn parse(source: &str, source_name: &str) -> Result<ParsedFile, Diagn
             }
             continue;
         }
-        let taken =
-            hardware_names.contains(&name) || data.contains_key(&name) || enums.contains_key(&name);
+        // Structs, enums and functions share one name namespace: a call and a
+        // type name must be unambiguous.
+        let taken = hardware_names.contains(&name)
+            || function_names.contains(&name)
+            || data.contains_key(&name)
+            || enums.contains_key(&name);
         if taken {
             if duplicate.is_none() {
                 duplicate = Some((name, fallback()));
@@ -179,7 +235,7 @@ pub(crate) fn parse(source: &str, source_name: &str) -> Result<ParsedFile, Diagn
         }
         match kind {
             DeclKind::Struct(item_struct) => {
-                if is_hardware_instance(&item_struct) {
+                if has_hardware_instance(&item_struct.attrs) {
                     hardware_names.push(name);
                 } else {
                     data.insert(name, *item_struct);
@@ -188,6 +244,7 @@ pub(crate) fn parse(source: &str, source_name: &str) -> Result<ParsedFile, Diagn
             DeclKind::Enum(item_enum) => {
                 enums.insert(name, *item_enum);
             }
+            DeclKind::Function => function_names.push(name),
         }
     }
 
@@ -224,6 +281,22 @@ pub(crate) fn parse(source: &str, source_name: &str) -> Result<ParsedFile, Diagn
             .expect("hardware struct was collected from this file");
         match hardware_struct(source_name, item_struct, &mut diagnostics) {
             Some(parsed) => hw.push(parsed),
+            None => continue,
+        }
+    }
+
+    let mut functions = Vec::new();
+    for name in &function_names {
+        let item_fn = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(function) if function.sig.ident == name.as_str() => Some(function),
+                _ => None,
+            })
+            .expect("hardware function was collected from this file");
+        match hardware_function(source_name, item_fn, &mut diagnostics) {
+            Some(parsed) => functions.push(parsed),
             None => continue,
         }
     }
@@ -267,6 +340,7 @@ pub(crate) fn parse(source: &str, source_name: &str) -> Result<ParsedFile, Diagn
     }
     Ok(ParsedFile {
         hw,
+        functions,
         data,
         enums,
         impls,
@@ -313,9 +387,12 @@ fn fallback_span(source_name: &str) -> SourceSpan {
     SourceSpan::new(source_name, 1, 1)
 }
 
-fn is_hardware_instance(item_struct: &syn::ItemStruct) -> bool {
-    item_struct
-        .attrs
+/// True when an item carries the `#[hardware_instance]` marker.
+///
+/// The marker is consulted for a `struct` (one module) and a `fn` (one
+/// combinational function); any other item is left alone, exactly as before.
+fn has_hardware_instance(attrs: &[syn::Attribute]) -> bool {
+    attrs
         .iter()
         .any(|attr| attr.path().is_ident("hardware_instance"))
 }
@@ -463,6 +540,209 @@ fn hardware_struct(
         fields: parsed_fields,
         span,
     })
+}
+
+/// Validate and collect one `#[hardware_instance] fn`.
+///
+/// A hardware function is combinational: its parameters are the inputs, its
+/// return type lists the outputs, and its body is ordinary DSL combinational
+/// logic. Everything that would change that meaning is rejected here rather
+/// than ignored: a modifier, a generic parameter, a where-clause, a `self`
+/// receiver, a parameter without an explicit type, no return type, and any
+/// `always!` process inside the body.
+fn hardware_function(
+    source_name: &str,
+    item: &syn::ItemFn,
+    diagnostics: &mut Diagnostics,
+) -> Option<HwFunction> {
+    let sig = &item.sig;
+    let name = sig.ident.to_string();
+    let span = span_in(source_name, sig.ident.span()).unwrap_or_else(|| fallback_span(source_name));
+
+    // A modifier changes what the function is, so it is rejected instead of
+    // being dropped.
+    let modifier = [
+        (sig.constness.is_some(), "`const fn`"),
+        (sig.asyncness.is_some(), "`async fn`"),
+        (sig.unsafety.is_some(), "`unsafe fn`"),
+        (sig.abi.is_some(), "an `extern` function"),
+        (sig.variadic.is_some(), "a variadic function"),
+    ]
+    .into_iter()
+    .find_map(|(present, what)| present.then_some(what));
+    if let Some(what) = modifier {
+        diagnostics.push(Diagnostic::error(
+            codes::UNSUPPORTED,
+            span,
+            format!("hardware function `{name}` is {what}, which has no hardware meaning"),
+        ));
+        return None;
+    }
+
+    if let Some(parameter) = sig.generics.params.first() {
+        diagnostics.push(Diagnostic::error(
+            codes::UNSUPPORTED,
+            span_in(source_name, parameter.span()),
+            format!(
+                "hardware function `{name}` declares generic parameters; a combinational function has fixed input and output types"
+            ),
+        ));
+        return None;
+    }
+    if let Some(where_clause) = &sig.generics.where_clause {
+        diagnostics.push(Diagnostic::error(
+            codes::UNSUPPORTED,
+            span_in(source_name, where_clause.span()),
+            format!(
+                "hardware function `{name}` has a where-clause; a combinational function has fixed input and output types"
+            ),
+        ));
+        return None;
+    }
+
+    let mut params = Vec::new();
+    for input in &sig.inputs {
+        match input {
+            syn::FnArg::Receiver(receiver) => {
+                diagnostics.push(Diagnostic::error(
+                    codes::UNSUPPORTED,
+                    span_in(source_name, receiver.span()),
+                    format!(
+                        "hardware function `{name}` takes `self`; a combinational function has only input parameters"
+                    ),
+                ));
+                return None;
+            }
+            syn::FnArg::Typed(typed) => {
+                let syn::Pat::Ident(pattern) = &*typed.pat else {
+                    diagnostics.push(Diagnostic::error(
+                        codes::DECLARATION,
+                        span_in(source_name, typed.pat.span()),
+                        format!(
+                            "a parameter of hardware function `{name}` is not a plain name; write `name: uint<8>`"
+                        ),
+                    ));
+                    return None;
+                };
+                if pattern.by_ref.is_some() || pattern.subpat.is_some() {
+                    diagnostics.push(Diagnostic::error(
+                        codes::DECLARATION,
+                        span_in(source_name, pattern.span()),
+                        format!(
+                            "parameter `{}` of hardware function `{name}` must be a plain name",
+                            pattern.ident
+                        ),
+                    ));
+                    return None;
+                }
+                let param_name = pattern.ident.to_string();
+                let param_span =
+                    span_in(source_name, pattern.ident.span()).unwrap_or_else(|| span.clone());
+                if matches!(&*typed.ty, syn::Type::Infer(_)) {
+                    diagnostics.push(
+                        Diagnostic::error(
+                            codes::BAD_TYPE,
+                            param_span,
+                            format!(
+                                "parameter `{param_name}` of hardware function `{name}` needs an explicit type"
+                            ),
+                        )
+                        .with_note(format!("write `{param_name}: uint<8>`"), None),
+                    );
+                    return None;
+                }
+                params.push(HwFunctionParam {
+                    name: param_name,
+                    ty: (*typed.ty).clone(),
+                    span: param_span,
+                });
+            }
+        }
+    }
+
+    let ret = match &sig.output {
+        syn::ReturnType::Default => {
+            missing_return(&name, &span, diagnostics);
+            return None;
+        }
+        syn::ReturnType::Type(_, ty) => {
+            if matches!(&**ty, syn::Type::Tuple(tuple) if tuple.elems.is_empty()) {
+                missing_return(&name, &span, diagnostics);
+                return None;
+            }
+            (**ty).clone()
+        }
+    };
+
+    if let Some(at) = always_in_block(&item.block) {
+        diagnostics.push(
+            Diagnostic::error(
+                codes::UNSUPPORTED,
+                span_in(source_name, at),
+                format!(
+                    "hardware function `{name}` is combinational and cannot contain `always!`"
+                ),
+            )
+            .with_note(
+                "move sequential logic into a module: `impl Hardware for <Struct> { fn run(&mut self) { always! { .. } } }`",
+                None,
+            ),
+        );
+        return None;
+    }
+
+    Some(HwFunction {
+        name,
+        params,
+        ret,
+        body: (*item.block).clone(),
+        span,
+    })
+}
+
+/// Report a missing output list, explaining the tuple form.
+fn missing_return(name: &str, span: &SourceSpan, diagnostics: &mut Diagnostics) {
+    diagnostics.push(
+        Diagnostic::error(
+            codes::BAD_TYPE,
+            Some(span.clone()),
+            format!(
+                "hardware function `{name}` declares no return type; a hardware function's outputs are its return value"
+            ),
+        )
+        .with_note(
+            format!("write `-> (uint<8>, bool)` and call it as `let (a, b) = {name}(..)`"),
+            None,
+        ),
+    );
+}
+
+/// Where the first `always!` in `block` is written, if there is one.
+///
+/// The whole body is walked, so an `always!` nested in an `if`, a `match` arm
+/// or any other statement is found as well as one at the top level. The raw
+/// span is returned so a missing source location never hides the rejection.
+fn always_in_block(block: &syn::Block) -> Option<proc_macro2::Span> {
+    struct Finder {
+        found: Option<proc_macro2::Span>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Finder {
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            let is_always = mac
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident == "always")
+                .unwrap_or(false);
+            if self.found.is_none() && is_always {
+                self.found = Some(mac.span());
+            }
+            syn::visit::visit_macro(self, mac);
+        }
+    }
+    let mut finder = Finder { found: None };
+    syn::visit::Visit::visit_block(&mut finder, block);
+    finder.found
 }
 
 fn hardware_impl(
@@ -1155,10 +1435,12 @@ fn parse_hints(source: &str, source_name: &str, span: Option<&SourceSpan>) -> Ve
     notes
 }
 
-/// A plain data declaration, kept apart so structs and enums share one loop.
+/// A named declaration, kept apart so structs, enums and functions share one
+/// duplicate-name loop.
 enum DeclKind {
     Struct(Box<syn::ItemStruct>),
     Enum(Box<syn::ItemEnum>),
+    Function,
 }
 
 /// The enum names the language defines itself.
@@ -1181,4 +1463,238 @@ fn has_unbraced_const_expression(line: &str) -> bool {
         return false;
     }
     inner.contains('+') || inner.contains('*') || inner.contains('/') || inner.contains('%')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn first_error(source: &str) -> Diagnostic {
+        parse(source, "f.shy.rs")
+            .expect_err("the source must be rejected")
+            .into_first_error()
+    }
+
+    #[test]
+    fn hardware_function_with_tuple_return_is_parsed() {
+        let file = parse(
+            r#"
+#[hardware_instance]
+fn add_one(y: uint<8>, z: bool) -> (uint<8>, bool) {
+    (y, z)
+}
+"#,
+            "f.shy.rs",
+        )
+        .expect("a valid hardware function parses");
+
+        assert!(file.hw.is_empty(), "a function is not a module struct");
+        assert_eq!(file.functions.len(), 1);
+        let function = &file.functions[0];
+        assert_eq!(function.name, "add_one");
+        assert_eq!(function.params.len(), 2);
+        assert_eq!(function.params[0].name, "y");
+        let syn::Type::Path(ty) = &function.params[0].ty else {
+            panic!("expected `uint<8>`, found {:?}", function.params[0].ty);
+        };
+        assert_eq!(ty.path.segments.last().unwrap().ident, "uint");
+        assert_eq!(function.params[1].name, "z");
+
+        let syn::Type::Tuple(ret) = &function.ret else {
+            panic!("expected a tuple return, found {:?}", function.ret);
+        };
+        assert_eq!(ret.elems.len(), 2);
+        assert_eq!(function.body.stmts.len(), 1);
+    }
+
+    #[test]
+    fn a_parameter_without_a_type_is_rejected() {
+        let diagnostic = first_error(
+            r#"
+#[hardware_instance]
+fn f(y: _) -> uint<8> {
+    y
+}
+"#,
+        );
+        assert_eq!(diagnostic.code, codes::BAD_TYPE);
+        assert!(
+            diagnostic.message.contains("explicit type"),
+            "{}",
+            diagnostic.message
+        );
+        assert!(diagnostic.message.contains('y'), "{}", diagnostic.message);
+    }
+
+    #[test]
+    fn a_missing_return_type_explains_the_tuple_form() {
+        let diagnostic = first_error(
+            r#"
+#[hardware_instance]
+fn f(y: uint<8>) {
+    let _ = y;
+}
+"#,
+        );
+        assert_eq!(diagnostic.code, codes::BAD_TYPE);
+        assert!(
+            diagnostic.message.contains("no return type"),
+            "{}",
+            diagnostic.message
+        );
+        assert!(
+            diagnostic
+                .notes
+                .iter()
+                .any(|note| note.message.contains("-> (uint<8>, bool)")),
+            "{:?}",
+            diagnostic.notes
+        );
+
+        // `-> ()` says the same thing in a different spelling.
+        let diagnostic = first_error(
+            r#"
+#[hardware_instance]
+fn f(y: uint<8>) -> () {
+    let _ = y;
+}
+"#,
+        );
+        assert_eq!(diagnostic.code, codes::BAD_TYPE);
+    }
+
+    #[test]
+    fn a_function_name_may_not_repeat_another_declaration() {
+        let diagnostic = first_error(
+            r#"
+#[hardware_instance]
+struct Thing {
+    #[In] a: uint<8>,
+}
+
+#[hardware_instance]
+fn Thing(y: uint<8>) -> uint<8> {
+    y
+}
+"#,
+        );
+        assert_eq!(diagnostic.code, codes::DECLARATION);
+        assert!(
+            diagnostic
+                .message
+                .contains("`Thing` is declared more than once"),
+            "{}",
+            diagnostic.message
+        );
+
+        let diagnostic = first_error(
+            r#"
+#[hardware_instance]
+fn f(y: uint<8>) -> uint<8> {
+    y
+}
+
+#[hardware_instance]
+fn f(y: uint<8>) -> uint<8> {
+    y
+}
+"#,
+        );
+        assert_eq!(diagnostic.code, codes::DECLARATION);
+        assert!(
+            diagnostic
+                .message
+                .contains("`f` is declared more than once"),
+            "{}",
+            diagnostic.message
+        );
+    }
+
+    #[test]
+    fn always_inside_a_hardware_function_is_rejected() {
+        let diagnostic = first_error(
+            r#"
+#[hardware_instance]
+fn f(y: uint<8>) -> uint<8> {
+    if y[0] {
+        always! { q = 0; }
+    }
+    y
+}
+"#,
+        );
+        assert_eq!(diagnostic.code, codes::UNSUPPORTED);
+        assert!(
+            diagnostic.message.contains("combinational"),
+            "{}",
+            diagnostic.message
+        );
+        assert!(
+            diagnostic.message.contains("always!"),
+            "{}",
+            diagnostic.message
+        );
+        assert!(
+            diagnostic
+                .notes
+                .iter()
+                .any(|note| note.message.contains("impl Hardware")),
+            "{:?}",
+            diagnostic.notes
+        );
+    }
+
+    #[test]
+    fn non_combinational_signatures_are_rejected() {
+        for source in [
+            "#[hardware_instance]\nasync fn f(y: uint<8>) -> uint<8> { y }",
+            "#[hardware_instance]\nunsafe fn f(y: uint<8>) -> uint<8> { y }",
+            "#[hardware_instance]\nconst fn f(y: uint<8>) -> uint<8> { y }",
+            "#[hardware_instance]\nfn f<T>(y: uint<8>) -> uint<8> { y }",
+            "#[hardware_instance]\nfn f(y: uint<8>) -> uint<8> where uint<8>: Copy { y }",
+            "#[hardware_instance]\nfn f(self, y: uint<8>) -> uint<8> { y }",
+        ] {
+            let diagnostic = first_error(source);
+            assert_eq!(
+                diagnostic.code,
+                codes::UNSUPPORTED,
+                "{source}: {}",
+                diagnostic.message
+            );
+        }
+    }
+
+    #[test]
+    fn the_attribute_on_other_items_keeps_the_existing_behaviour() {
+        // A struct is still a module and an enum is still plain data: the
+        // marker is only consulted for structs and functions.
+        let file = parse(
+            r#"
+#[hardware_instance]
+struct M {
+    #[In] a: uint<8>,
+}
+
+#[hardware_instance]
+enum E {
+    A,
+    B,
+}
+"#,
+            "f.shy.rs",
+        )
+        .expect("struct and enum keep their existing meaning");
+
+        assert_eq!(file.hw.len(), 1);
+        assert_eq!(file.hw[0].name, "M");
+        assert!(file.enums.contains_key("E"));
+        assert!(file.functions.is_empty());
+    }
+
+    #[test]
+    fn a_plain_function_is_not_a_design_item() {
+        let file = parse("fn helper(y: uint<8>) -> uint<8> { y }", "f.shy.rs")
+            .expect("a plain function is ignored");
+        assert!(file.functions.is_empty());
+    }
 }

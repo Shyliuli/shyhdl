@@ -7,3 +7,6 @@ description = "The smallest ShyHDL design driven from a Rust main"
 
 [dependencies]
 shyhdl = { path = "../.." }
+
+[lints]
+workspace = true

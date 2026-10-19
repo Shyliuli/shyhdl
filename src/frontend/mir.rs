@@ -115,6 +115,9 @@ impl Ty {
             Ty::SInt(width) => format!("int<{width}>"),
             Ty::Array { element, len } => format!("[{}; {len}]", element.describe()),
             Ty::Enum(enum_ty) => enum_ty.name.clone(),
+            Ty::Struct(strukt) if strukt.is_tuple() => {
+                format!("tuple {} ({} bits)", strukt.name, strukt.total)
+            }
             Ty::Struct(strukt) => format!("struct {} ({} bits)", strukt.name, strukt.total),
         }
     }
@@ -171,6 +174,20 @@ impl StructTy {
             fields: resolved,
             total,
         })
+    }
+
+    /// True for the synthetic layout a tuple type uses: the fields are named
+    /// `0`, `1`, ... in order, and the name is the descriptive `(T, U, ...)`.
+    ///
+    /// A declared struct cannot have a field named `0`, so the field names alone
+    /// identify a tuple.
+    pub fn is_tuple(&self) -> bool {
+        !self.fields.is_empty()
+            && self
+                .fields
+                .iter()
+                .enumerate()
+                .all(|(index, field)| field.name == index.to_string())
     }
 }
 

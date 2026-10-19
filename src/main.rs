@@ -105,6 +105,8 @@ enum Command {
     Debug(DebugArgs),
     /// Put a design on the NVBoard virtual board (needs the `nvboard` feature).
     Board(BoardArgs),
+    /// Serve ShyHDL diagnostics to an editor over stdio (LSP).
+    Lsp,
 }
 
 /// Arguments shared by every command that compiles a design.
@@ -339,6 +341,7 @@ fn run(cli: &Cli) -> Result<u8> {
         Command::ListTests(args) => run_list_tests(args),
         Command::Debug(args) => run_debug(args),
         Command::Board(args) => run_board(args),
+        Command::Lsp => run_lsp(),
     }
 }
 
@@ -613,6 +616,22 @@ fn run_debug(args: &DebugArgs) -> Result<u8> {
         Err(failure) => {
             eprintln!("shyhdl: {}", failure.message);
             Ok(failure.code)
+        }
+    }
+}
+
+/// Serve the language server on stdin/stdout until the editor exits.
+///
+/// The exit code is the LSP convention, not the CLI table above: a clean
+/// `shutdown` followed by `exit` is `0`, and a client that closes the pipe
+/// without shutting down is `1`. A broken pipe or a malformed frame is reported
+/// on stderr and is a general failure.
+fn run_lsp() -> Result<u8> {
+    match shyhdl::lsp::serve_stdio() {
+        Ok(code) => Ok(code),
+        Err(error) => {
+            eprintln!("shyhdl: lsp: {error}");
+            Ok(exit::FAILED)
         }
     }
 }

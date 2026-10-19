@@ -37,6 +37,7 @@ impl Compiler {
             }
             syn::Expr::Index(index) => self.lower_index(index, span),
             syn::Expr::Array(array) => self.lower_array_literal(array, expected, span),
+            syn::Expr::Tuple(tuple) => self.lower_tuple_literal(tuple, expected, span),
             syn::Expr::Repeat(repeat) => self.lower_repeat_literal(repeat, expected, span),
             syn::Expr::MethodCall(call) => self.lower_method(call, span),
             syn::Expr::Call(call) => self.lower_call_or_variant(call, expected, span),
@@ -142,6 +143,20 @@ impl Compiler {
                 });
             }
         }
+        if let Some(value) = self.cur.env.get(name).copied() {
+            return Ok(Expr {
+                ty: Ty::UInt(0),
+                kind: ExprKind::Const {
+                    value: value as i128,
+                    width: 0,
+                },
+                source: span,
+            });
+        }
+        // A hardware field is the last lookup step for an unqualified name in
+        // `run`: it is the DSL equivalent of Rust's implicit `self.<name>`.
+        // Keep this after process locals and build-time parameters so `let x`
+        // (including `let mut x`) and `N` retain ordinary lexical precedence.
         if let Some(signal) = self.cur.signal_by_name.get(name).copied() {
             self.reads.insert(signal);
             let ty = self.cur.signal(signal).ty.clone();
@@ -161,16 +176,6 @@ impl Compiler {
             return Ok(Expr {
                 ty,
                 kind: ExprKind::Signal(signal),
-                source: span,
-            });
-        }
-        if let Some(value) = self.cur.env.get(name).copied() {
-            return Ok(Expr {
-                ty: Ty::UInt(0),
-                kind: ExprKind::Const {
-                    value: value as i128,
-                    width: 0,
-                },
                 source: span,
             });
         }
@@ -908,6 +913,84 @@ impl Compiler {
             .iter()
             .map(|field| provided.remove(&field.name).expect("checked above"))
             .collect();
+        Ok(Expr {
+            ty,
+            kind: ExprKind::Concat(elements),
+            source: span,
+        })
+    }
+
+    /// `(a, b)`: a tuple value, field `0` most significant.
+    ///
+    /// The value is the same concatenation a struct literal produces, in field
+    /// order. With an expected tuple type every element is lowered against its
+    /// field's type; without one, the element types themselves make the tuple
+    /// type, so the literal is never silently given a width from nowhere.
+    pub(super) fn lower_tuple_literal(
+        &mut self,
+        tuple: &syn::ExprTuple,
+        expected: Option<&Ty>,
+        span: SourceSpan,
+    ) -> Result<Expr, Diagnostic> {
+        if tuple.elems.is_empty() {
+            return Err(Diagnostic::error(
+                codes::BAD_TYPE,
+                Some(span),
+                "the unit value `()` has no bits and is not a hardware value",
+            ));
+        }
+        let expected_tuple = match expected {
+            Some(Ty::Struct(strukt)) if strukt.is_tuple() => {
+                if tuple.elems.len() != strukt.fields.len() {
+                    return Err(Diagnostic::error(
+                        codes::WIDTH_MISMATCH,
+                        Some(span),
+                        format!(
+                            "this tuple has {} element(s), but {} were expected",
+                            tuple.elems.len(),
+                            strukt.fields.len()
+                        ),
+                    ));
+                }
+                Some(strukt.clone())
+            }
+            Some(other) => {
+                return Err(Diagnostic::error(
+                    codes::WIDTH_MISMATCH,
+                    Some(span),
+                    format!("a tuple is not a value of {}", other.describe()),
+                ))
+            }
+            None => None,
+        };
+
+        let mut elements = Vec::new();
+        for (index, item) in tuple.elems.iter().enumerate() {
+            let item_span = self.span(item.span()).unwrap_or_else(|| span.clone());
+            let expected_field = expected_tuple
+                .as_ref()
+                .map(|strukt| strukt.fields[index].ty.clone());
+            let value = self.lower_expr(item, expected_field.as_ref())?;
+            match &expected_field {
+                Some(field_ty) => check_width(field_ty, None, &value, item_span)?,
+                None if value.ty.width() == 0 => {
+                    return Err(Diagnostic::error(
+                        codes::WIDTH_UNKNOWN,
+                        Some(item_span),
+                        "cannot infer the width of this integer literal; annotate the value's type (REQ-LANG-030)",
+                    ))
+                }
+                None => {}
+            }
+            elements.push(value);
+        }
+        let ty = match expected_tuple {
+            Some(strukt) => Ty::Struct(strukt),
+            None => self.tuple_type(
+                elements.iter().map(|element| element.ty.clone()).collect(),
+                &span,
+            )?,
+        };
         Ok(Expr {
             ty,
             kind: ExprKind::Concat(elements),
@@ -1683,14 +1766,10 @@ impl Compiler {
         field: &syn::ExprField,
         span: SourceSpan,
     ) -> Result<Expr, Diagnostic> {
-        let syn::Member::Named(member) = &field.member else {
-            return Err(Diagnostic::error(
-                codes::UNSUPPORTED,
-                Some(span),
-                "tuple field access is not supported",
-            ));
+        let name = match &field.member {
+            syn::Member::Named(member) => member.to_string(),
+            syn::Member::Unnamed(index) => index.index.to_string(),
         };
-        let name = member.to_string();
         let base = self.lower_expr(&field.base, None)?;
         let Some(layout) = base.ty.field(&name).cloned() else {
             return Err(Diagnostic::error(
@@ -1928,6 +2007,17 @@ impl Compiler {
             .iter()
             .map(|segment| segment.ident.to_string())
             .collect();
+        // A call of a `#[hardware_instance] fn` is an instance of that
+        // function's module, not a Rust call and not a value constructor.
+        if segments.len() == 1
+            && self
+                .parsed
+                .functions
+                .iter()
+                .any(|function| function.name == segments[0])
+        {
+            return self.lower_function_call(&segments[0], call, span);
+        }
         if segments.last().map(String::as_str) == Some("from") {
             return self.lower_call(call, span);
         }
@@ -1951,6 +2041,154 @@ impl Compiler {
             expected,
             span,
         )
+    }
+
+    /// Lower a call of a combinational function into an instance.
+    ///
+    /// The instance is created at the call site with a unique name, its inputs
+    /// are connected from the arguments and its outputs become the value of the
+    /// call: a single output is that signal, several outputs are a tuple value
+    /// the caller destructures.
+    fn lower_function_call(
+        &mut self,
+        name: &str,
+        call: &syn::ExprCall,
+        span: SourceSpan,
+    ) -> Result<Expr, Diagnostic> {
+        let module = self.ensure_function_module(name).map_err(|()| {
+            Diagnostic::error(
+                codes::INTERNAL,
+                Some(span.clone()),
+                format!("hardware function `{name}` could not be lowered"),
+            )
+        })?;
+        let ports: Vec<ChildPort> = self.modules[module]
+            .ports
+            .iter()
+            .map(|port| ChildPort {
+                name: port.verilog_name.clone(),
+                dir: port.dir,
+                ty: self.modules[module].signals[port.signal].ty.clone(),
+                parent_signal: None,
+            })
+            .collect();
+        let inputs: Vec<ChildPort> = ports
+            .iter()
+            .filter(|port| port.dir == PortDir::In)
+            .cloned()
+            .collect();
+        if call.args.len() != inputs.len() {
+            return Err(Diagnostic::error(
+                codes::BAD_TYPE,
+                Some(span),
+                format!(
+                    "`{name}` takes {} argument(s), {} given",
+                    inputs.len(),
+                    call.args.len()
+                ),
+            ));
+        }
+
+        self.cur.temp_count += 1;
+        let field = format!("{name}__{}", self.cur.temp_count);
+        let index = self.cur.instances.len();
+        let mut child_ports = ports;
+        for child_port in child_ports.iter_mut() {
+            if child_port.dir != PortDir::Out {
+                continue;
+            }
+            let net_name = format!("{field}_{}", child_port.name);
+            self.declare_signal(
+                &net_name,
+                None,
+                child_port.ty.clone(),
+                SignalKind::Wire,
+                Some(span.clone()),
+            )
+            .map_err(|()| {
+                Diagnostic::error(
+                    codes::NAME_COLLISION,
+                    Some(span.clone()),
+                    format!("`{net_name}` is already declared"),
+                )
+            })?;
+            let signal = self.cur.signal_by_name[&net_name];
+            if self
+                .claim_or_report(signal, None, Owner::Instance(index), &span)
+                .is_err()
+            {
+                return Err(Diagnostic::error(
+                    codes::INTERNAL,
+                    Some(span.clone()),
+                    format!("`{net_name}` cannot be driven by the function instance"),
+                ));
+            }
+            child_port.parent_signal = Some(signal);
+        }
+
+        let mut connections: Vec<Option<(Expr, SourceSpan)>> = vec![None; child_ports.len()];
+        for (position, argument) in call.args.iter().enumerate() {
+            let port = &inputs[position];
+            let port_index = child_ports
+                .iter()
+                .position(|candidate| candidate.name == port.name)
+                .expect("input port is part of the instance");
+            let value = self.lower_expr_top(argument, Some(&port.ty))?;
+            check_width(&port.ty, None, &value, span.clone())?;
+            connections[port_index] = Some((value, span.clone()));
+        }
+
+        let ports_read: HashSet<String> = child_ports
+            .iter()
+            .filter(|port| port.dir == PortDir::Out)
+            .map(|port| port.name.clone())
+            .collect();
+        let output_values: Vec<(Ty, SignalId)> = child_ports
+            .iter()
+            .filter(|port| port.dir == PortDir::Out)
+            .map(|port| {
+                (
+                    port.ty.clone(),
+                    port.parent_signal.expect("output ports have a net"),
+                )
+            })
+            .collect();
+
+        self.cur.instances.push(InstanceBuild {
+            field,
+            verilog_name: String::new(),
+            module_source_name: name.to_string(),
+            module_verilog_name: self.modules[module].verilog_name.clone(),
+            params: Vec::new(),
+            source: span.clone(),
+            child_ports,
+            connections,
+            read_outputs: ports_read,
+        });
+        // The emitter names the instance from `verilog_name`; the call site is
+        // anonymous, so it gets the same unique name as the field.
+        let instance = self.cur.instances.last_mut().expect("just pushed");
+        instance.verilog_name = instance.field.clone();
+
+        let mut values = Vec::new();
+        for (ty, signal) in output_values {
+            self.reads.insert(signal);
+            values.push(Expr {
+                ty,
+                kind: ExprKind::Signal(signal),
+                source: span.clone(),
+            });
+        }
+        if values.len() == 1 {
+            return Ok(values.pop().expect("one value"));
+        }
+        let elements: Vec<Ty> = values.iter().map(|value| value.ty.clone()).collect();
+        let ty = self.tuple_type(elements, &span)?;
+        Ok(Expr {
+            ty,
+            kind: ExprKind::Concat(values),
+            source: span,
+        })
     }
 
     /// One enum value: `None`, `Some(v)`, `Msg::Data(v)` or `Msg::Pair { hi, lo }`.

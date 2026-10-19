@@ -15,6 +15,12 @@ exclude = ["REQUIREMENTS.md"]
 # `examples/*.shy.rs` are ShyHDL DSL inputs, not Rust example targets.
 autoexamples = false
 
+# The macros emit a `cfg(rust_analyzer)` branch so the editor sees the real
+# fields and `run` body instead of the empty placeholder rustc compiles. The
+# name is not a Cargo feature: declare it here so normal builds do not warn.
+[lints]
+workspace = true
+
 [features]
 default = []
 # Optional NVBoard backend: `shyhdl board` puts a design on the NJU virtual
@@ -33,6 +39,11 @@ members = [
     "examples/select",
     "examples/tour",
 ]
+
+[workspace.lints.rust]
+# `cfg(rust_analyzer)` is set by rust-analyzer, never by rustc. Whitelisting it
+# keeps the analyzer-only branch free of `unexpected_cfgs` warnings.
+unexpected_cfgs = { level = "allow", check-cfg = ["cfg(rust_analyzer)"] }
 
 [dependencies]
 # Diagnostics: every error carries its path, source span or underlying cause.

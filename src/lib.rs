@@ -21,9 +21,12 @@
 //! `docs/library.md`.
 
 pub mod debugger;
+#[cfg(rust_analyzer)]
+mod editor;
 pub mod error;
 pub mod frontend;
 pub mod interop;
+pub mod lsp;
 pub mod metadata;
 #[cfg(feature = "nvboard")]
 pub mod nvboard;
@@ -35,7 +38,12 @@ pub mod simulation;
 pub mod testbench;
 pub mod waveform;
 
+#[cfg(rust_analyzer)]
+pub use editor::*;
+
 pub use error::{Error, Result};
+#[cfg(feature = "nvboard")]
+pub use interop::board;
 pub use interop::{
     __inventory, build, check, list_tests, module_verilog, run, simulate, source_for, test,
     test_verilog, verilog, Debugger, Hardware, PartKind, RegisteredPart, RunResult, Simulator,
@@ -46,8 +54,6 @@ pub use metadata::{
     SourceSpan, SourceUnit, TypeField, ValueType, Variable, SCHEMA_VERSION,
 };
 pub use simulation::Outcome;
-#[cfg(feature = "nvboard")]
-pub use interop::board;
 
 // Re-exported so a user writes `use shyhdl::*;` once and gets the attributes too.
 pub use shyhdl_macros::{hardware, hardware_instance, hardware_test};

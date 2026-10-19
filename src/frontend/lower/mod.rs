@@ -651,6 +651,9 @@ struct Compiler {
     proc: Option<ProcCtx>,
     /// Reads collected while lowering the expression currently in flight.
     reads: HashSet<SignalId>,
+    /// Combinational functions, by name: their synthesized module is lowered
+    /// once and every call site instantiates it.
+    function_modules: HashMap<String, usize>,
 }
 
 impl Compiler {
@@ -675,7 +678,199 @@ impl Compiler {
             ),
             proc: None,
             reads: HashSet::new(),
+            function_modules: HashMap::new(),
         }
+    }
+
+    /// Synthesize one module per `#[hardware_instance] fn`.
+    ///
+    /// A function is a combinational module whose inputs are its parameters and
+    /// whose outputs are the elements of its return type. The body is lowered
+    /// exactly like a `run` body, with the tail expression assigned to the
+    /// outputs, so the Verilog emitter and the debugger see an ordinary module.
+    fn prepare_functions(&mut self) -> Result<(), ()> {
+        let functions = self.parsed.functions.clone();
+        // Every function becomes an ordinary module declaration first, so a
+        // call in any body can name one whatever order they are written in.
+        for function in &functions {
+            let hw = self.function_struct(function)?;
+            let implementation = self.function_impl(function, &hw)?;
+            self.parsed.hw.push(hw.clone());
+            self.parsed.impls.insert(hw.name.clone(), implementation);
+        }
+        for function in &functions {
+            if self.ensure_function_module(&function.name).is_err() {
+                return Err(());
+            }
+        }
+        Ok(())
+    }
+
+    /// Lower a function's module on first use, and return its index.
+    fn ensure_function_module(&mut self, name: &str) -> Result<usize, ()> {
+        if let Some(index) = self.function_modules.get(name) {
+            return Ok(*index);
+        }
+        let Some(hw) = self
+            .parsed
+            .hw
+            .iter()
+            .find(|candidate| candidate.name == name)
+            .cloned()
+        else {
+            return Err(());
+        };
+        let index = self.lower_module(&hw, ConstEnv::new(), false)?;
+        self.function_modules.insert(name.to_string(), index);
+        Ok(index)
+    }
+
+    /// The module shape of a function: parameters in, return elements out.
+    fn function_struct(&mut self, function: &parse::HwFunction) -> Result<HwStruct, ()> {
+        let span = function.span.clone();
+        let mut fields = Vec::new();
+        for parameter in &function.params {
+            if let Err(diagnostic) = check_verilog_name(
+                &parameter.name,
+                "parameter name",
+                Some(parameter.span.clone()),
+            ) {
+                self.diagnostics.push(diagnostic);
+                return Err(());
+            }
+            fields.push(HwField {
+                name: parameter.name.clone(),
+                kind: FieldKind::In,
+                ty: parameter.ty.clone(),
+                span: parameter.span.clone(),
+            });
+        }
+        let outputs = match self.function_outputs(function) {
+            Ok(outputs) => outputs,
+            Err(diagnostic) => return self.error(diagnostic),
+        };
+        for (name, ty) in outputs {
+            fields.push(HwField {
+                name,
+                kind: FieldKind::Out,
+                ty,
+                span: span.clone(),
+            });
+        }
+        Ok(HwStruct {
+            name: function.name.clone(),
+            params: Vec::new(),
+            fields,
+            span,
+        })
+    }
+
+    /// The output types of a function, with the port name each one gets.
+    fn function_outputs(
+        &mut self,
+        function: &parse::HwFunction,
+    ) -> Result<Vec<(String, syn::Type)>, Diagnostic> {
+        let span = function.span.clone();
+        match &function.ret {
+            syn::Type::Tuple(tuple) => {
+                if tuple.elems.is_empty() {
+                    return Err(Diagnostic::error(
+                        codes::BAD_TYPE,
+                        Some(span),
+                        format!(
+                            "hardware function `{}` returns `()`, which has no outputs",
+                            function.name
+                        ),
+                    ));
+                }
+                Ok(tuple
+                    .elems
+                    .iter()
+                    .enumerate()
+                    .map(|(index, ty)| (format!("out{index}"), ty.clone()))
+                    .collect())
+            }
+            ty => Ok(vec![("out0".to_string(), ty.clone())]),
+        }
+    }
+
+    /// The `run` body of a function: its statements, then the tail expression
+    /// assigned to the outputs.
+    fn function_impl(&mut self, function: &parse::HwFunction, hw: &HwStruct) -> Result<HwImpl, ()> {
+        let span = function.span.clone();
+        let mut statements: Vec<syn::Stmt> = function.body.stmts.clone();
+        let tail = match statements.pop() {
+            Some(syn::Stmt::Expr(expression, None)) => Some(expression),
+            Some(other) => {
+                statements.push(other);
+                None
+            }
+            None => None,
+        };
+        let Some(tail) = tail else {
+            return self.err(
+                codes::BAD_TYPE,
+                Some(span),
+                format!(
+                    "hardware function `{}` must end with the value it returns",
+                    function.name
+                ),
+            );
+        };
+
+        let outputs: Vec<String> = hw
+            .fields
+            .iter()
+            .filter(|field| field.kind == FieldKind::Out)
+            .map(|field| field.name.clone())
+            .collect();
+        let mut assignments: Vec<syn::Stmt> = Vec::new();
+        match &tail {
+            syn::Expr::Tuple(tuple) if outputs.len() > 1 => {
+                if tuple.elems.len() != outputs.len() {
+                    return self.err(
+                        codes::BAD_TYPE,
+                        Some(span),
+                        format!(
+                            "hardware function `{}` returns {} value(s) but its type declares {}",
+                            function.name,
+                            tuple.elems.len(),
+                            outputs.len()
+                        ),
+                    );
+                }
+                for (output, value) in outputs.iter().zip(tuple.elems.iter()) {
+                    let name = syn::Ident::new(output, proc_macro2::Span::call_site());
+                    assignments.push(syn::parse_quote!(self.#name = #value;));
+                }
+            }
+            value if outputs.len() == 1 => {
+                let name = syn::Ident::new(&outputs[0], proc_macro2::Span::call_site());
+                assignments.push(syn::parse_quote!(self.#name = #value;));
+            }
+            _ => {
+                return self.err(
+                    codes::BAD_TYPE,
+                    Some(span),
+                    format!(
+                    "hardware function `{}` declares several outputs, so it must end with a tuple",
+                    function.name
+                ),
+                )
+            }
+        }
+        statements.extend(assignments);
+
+        let block: syn::Block = syn::parse_quote!({
+            #(#statements)*
+        });
+        Ok(HwImpl {
+            struct_name: function.name.clone(),
+            params: Vec::new(),
+            args: Vec::new(),
+            run: block,
+            span,
+        })
     }
 
     fn span(&self, span: proc_macro2::Span) -> Option<SourceSpan> {
@@ -755,6 +950,10 @@ impl Compiler {
             return self.error(diagnostic);
         };
 
+        if self.prepare_functions().is_err() {
+            return Err(());
+        }
+
         let env = match bind_params(
             &hw,
             &top_args,
@@ -772,6 +971,9 @@ impl Compiler {
         };
 
         for hw in &self.parsed.hw {
+            if self.function_modules.contains_key(&hw.name) {
+                continue;
+            }
             if !self.reached.contains(&hw.name) {
                 self.diagnostics.push(Diagnostic::warning(
                     codes::UNREACHABLE,
@@ -1055,24 +1257,34 @@ impl Compiler {
     /// True when an assignment drives a child input port: that is structure, not
     /// behavior, so it must not end up inside a process.
     fn is_connection(&self, assign: &syn::ExprAssign) -> bool {
-        let Ok((true, _, path)) = decompose_place(&assign.left) else {
+        let Ok((is_self, base_name, path)) = decompose_place(&assign.left) else {
             return false;
         };
-        let Some(Component::Field(field)) = path.first() else {
-            return false;
+        // `self.kid.port` and the implicit `kid.port` name the same instance
+        // field; only the prefix differs.
+        let (field, path) = if is_self {
+            let Some(Component::Field(field)) = path.first() else {
+                return false;
+            };
+            (field.clone(), &path[1..])
+        } else {
+            let Some(name) = base_name else {
+                return false;
+            };
+            (name, &path[..])
         };
-        let Some(entry) = self.cur.instance_by_field.get(field).copied() else {
+        let Some(entry) = self.cur.instance_by_field.get(&field).copied() else {
             return false;
         };
         // An array of instances needs an index before the port; the index is
         // checked when the place is resolved, not here.
         let (instance, path) = match entry {
-            FieldInstances::Single(instance) => (instance, &path[1..]),
+            FieldInstances::Single(instance) => (instance, path),
             FieldInstances::Array { first, .. } => {
-                if !matches!(path.get(1), Some(Component::Bits(_))) {
+                if !matches!(path.first(), Some(Component::Bits(_))) {
                     return false;
                 }
-                (first, &path[2..])
+                (first, &path[1..])
             }
         };
         let Some(Component::Field(port)) = path.first() else {

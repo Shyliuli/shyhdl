@@ -66,6 +66,9 @@ pub enum PartKind {
     Data,
     /// An `enum` declaration.
     Enum,
+    /// A combinational function, declared with `#[hardware_instance]` on a
+    /// `fn`.
+    Function,
     /// The behaviour of a design, declared with `#[hardware]`.
     Impl,
     /// A test, declared with `#[hardware_test]`.
@@ -131,7 +134,7 @@ fn registered_source() -> Result<String> {
 /// Ordering key that puts definitions before the items that use them.
 fn definition_rank(kind: PartKind) -> u8 {
     match kind {
-        PartKind::Instance | PartKind::Data | PartKind::Enum => 0,
+        PartKind::Instance | PartKind::Data | PartKind::Enum | PartKind::Function => 0,
         PartKind::Impl | PartKind::Test => 1,
     }
 }
@@ -626,7 +629,8 @@ impl Debugger {
         // The step is the caller's, converted into the recording's own ticks. A
         // step the timescale cannot express is reported, not rounded away: the
         // grid a caller asks for is the grid they get.
-        let step = crate::waveform::Timescale::new(u64::from(step_ns), crate::waveform::TimeUnit::Nano);
+        let step =
+            crate::waveform::Timescale::new(u64::from(step_ns), crate::waveform::TimeUnit::Nano);
         let period = waveform.ticks(step).map_err(|error| Error::Io {
             path: recording.clone(),
             source: std::io::Error::other(error.to_string()),

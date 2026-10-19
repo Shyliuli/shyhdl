@@ -59,6 +59,148 @@ fn driven_value(verilog: &str, target: &str) -> String {
 }
 
 #[test]
+fn run_falls_back_to_self_for_unqualified_hardware_fields() {
+    let source = r#"
+#[hardware_instance]
+struct Dut {
+    #[In] a: uint<4>,
+    #[Out] y: uint<4>,
+}
+impl Hardware for Dut {
+    fn run(&mut self) {
+        y = a;
+    }
+}
+"#;
+    let compiled = compile(source, "implicit_self.shy.rs", "Dut").expect("implicit self compiles");
+    assert!(compiled.verilog.contains("y = a;"));
+}
+
+#[test]
+fn run_locals_still_shadow_implicit_self_fields() {
+    let source = r#"
+#[hardware_instance]
+struct Dut {
+    #[In] a: uint<4>,
+    #[Out] y: uint<4>,
+}
+impl Hardware for Dut {
+    fn run(&mut self) {
+        if a == 0 {
+            let mut a: uint<4> = 1;
+            a = a + 1;
+            y = a;
+        } else {
+            y = 0;
+        }
+    }
+}
+"#;
+    let compiled = compile(source, "implicit_self_local.shy.rs", "Dut").expect("local compiles");
+    assert!(compiled.verilog.contains("a__1 = 4'd1;"));
+    assert!(compiled.verilog.contains("y = a__1;"));
+}
+
+#[test]
+fn run_falls_back_to_self_for_unqualified_writes() {
+    let source = r#"
+#[hardware_instance]
+struct Dut {
+    #[In] a: uint<4>,
+    #[Out] y: uint<4>,
+    #[Out] z: uint<4>,
+}
+impl Hardware for Dut {
+    fn run(&mut self) {
+        y = a + 1;
+        if a == 0 {
+            let mut t: uint<4> = 3;
+            t = t + 1;
+            z = t;
+        } else {
+            let u: uint<4> = a;
+            z = u;
+        }
+    }
+}
+"#;
+    let compiled =
+        compile(source, "implicit_self_write.shy.rs", "Dut").expect("implicit writes compile");
+    // A bare write drives the module field exactly like `self.y`.
+    assert!(
+        compiled.verilog.contains("y = (a + 4'd1);"),
+        "{}",
+        compiled.verilog
+    );
+    // A nested `let` is a local, so reads of it never become `a` or `z`.
+    assert!(
+        compiled.verilog.contains("t = (t + 4'd1);"),
+        "{}",
+        compiled.verilog
+    );
+    assert!(compiled.verilog.contains("z = t;"), "{}", compiled.verilog);
+}
+
+#[test]
+fn unknown_name_is_still_reported() {
+    let source = r#"
+#[hardware_instance]
+struct Dut {
+    #[In] a: uint<4>,
+    #[Out] y: uint<4>,
+}
+impl Hardware for Dut {
+    fn run(&mut self) {
+        y = nope;
+    }
+}
+"#;
+    let error = compile(source, "implicit_self_unknown.shy.rs", "Dut").expect_err("unknown name");
+    assert_eq!(error.code, "SH-F003", "{error:?}");
+}
+
+#[test]
+fn run_falls_back_to_self_for_instance_fields() {
+    let source = r#"
+#[hardware_instance]
+struct Child {
+    #[In] a: uint<4>,
+    #[Out] y: uint<4>,
+}
+impl Hardware for Child {
+    fn run(&mut self) {
+        self.y = self.a;
+    }
+}
+#[hardware_instance]
+struct Parent {
+    #[In] a: uint<4>,
+    #[Out] y: uint<4>,
+    #[instance] kid: Child,
+}
+impl Hardware for Parent {
+    fn run(&mut self) {
+        kid.a = a;
+        y = kid.y;
+    }
+}
+"#;
+    let compiled = compile(source, "implicit_self_instance.shy.rs", "Parent")
+        .expect("implicit instance compiles");
+    assert!(compiled.verilog.contains(".a(a)"), "{}", compiled.verilog);
+    assert!(
+        compiled.verilog.contains(".y(kid_y)"),
+        "{}",
+        compiled.verilog
+    );
+    assert!(
+        compiled.verilog.contains("y = kid_y;"),
+        "{}",
+        compiled.verilog
+    );
+}
+
+#[test]
 fn adder8_wires_a_comb_child_into_a_registered_parent() {
     let source = example("adder.shy.rs");
     let compiled =
@@ -1021,7 +1163,10 @@ impl Hardware for Bank4 {
         .iter()
         .map(|instance| instance.verilog_name.as_str())
         .collect();
-    assert_eq!(children, vec!["cells__0", "cells__1", "cells__2", "cells__3"]);
+    assert_eq!(
+        children,
+        vec!["cells__0", "cells__1", "cells__2", "cells__3"]
+    );
 }
 
 /// An instance index has to be known while compiling: no wire can select a child.
