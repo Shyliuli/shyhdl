@@ -1,5 +1,8 @@
 # ShyHDL
 
+> Shy 是一台 AI 辅助开发的全栈计算机。ShyHDL 是它的硬件描述层：用 Rust 风格的源码描述
+> 硬件，构建期检查语义，导出可读的 Verilog，并把仿真、上板和回放接在同一条流水线上。
+
 用 Rust 风格的源码描述硬件，生成可读的 Verilog-2005。语言可以写在单文件 `.shy.rs` 里，也可以
 直接写进普通 Rust 程序：宏登记设计，库在运行时把它编译成 Verilog、导出 testbench、驱动仿真，
 并把一次运行录成可回放的记录。
@@ -7,7 +10,34 @@
 > 状态：0.1.0。语言子集已经可用；它不是把任意 Rust 编译成硬件的工具，边界见
 > [已知限制](#已知限制)。
 
-本项目是一个小玩具，由LLM生成，不建议直接用于生产。
+本项目由 AI 辅助开发，是一个教学玩具，不建议直接用于生产。
+
+## 抽象
+
+ShyHDL 只保留四层抽象，每一层都对应一个真实产物：
+
+| 抽象 | 写法 | 产物 |
+| --- | --- | --- |
+| 模块 | `#[hardware_instance] struct` 的端口与子实例 | 一个 Verilog module |
+| 组合逻辑 | `run` 里的顺序语句、`if`/`match`、构建期 `for` | 一个 `always @(*)` 过程 |
+| 组合函数 | `#[hardware_instance] fn`，一次调用一个实例 | 一个被调用的子模块 |
+| 时序 | `always!` 的事件臂，最后一个臂是时钟 | 一个 `always @(posedge)` 过程 |
+
+这些抽象让硬件语义在源码里就写死，而不是等综合工具猜：
+
+- **位宽、符号、扩展都显式**。`U<32>`、`zext::<64>()`、`trunc::<8>()` 写在源码里；中间值
+  不自动提升，越界在构建期报错。
+- **组合过程必须全路径赋值**。漏赋值会锁存，构建期直接报源码位置；同一过程里后写覆盖前写
+  是合法的，不算多驱动。
+- **单驱动、可检测环路**。每个位恰好有一个驱动者；成环的读-写链在构建期报错。
+- **测试就是源码的一部分**。`#[hardware_test]` 生成标准 Verilog-2005 testbench，不依赖
+  Rust DPI；同一份设计可以导出 Verilog、跑 Verilator、上 NVBoard。
+- **运行是可回放的记录**。一次仿真交出 VCD/FST 和 run manifest，GDB 读记录做
+  step/reverse-step/watch，不回跑仿真。
+
+这些抽象不追求"更高级的框架"：没有动态堆、递归、trait 对象和运行期循环。数组是固定布局
+的值，不会被推断成 RAM；需要存储器的设计把 RAM 放在设计外，用顶层端口连进来。
+
 ## 特性
 
 - **可读的 RTL**：生成的 Verilog 保留模块边界、实例名与源码位置注释；纯位模式的 `match`
@@ -199,6 +229,11 @@ macros/             proc-macro：hardware_instance、hardware、hardware_test
 examples/           单文件 DSL 示例与三个可运行工作区
 docs/               语言与库文档
 ```
+
+## 相关项目
+
+- [ShyProject](https://github.com/Shyliuli/ShyProject)：ShyISA、编译器、链接器、模拟器与 ShyOS
+- [ShyCPU](https://github.com/Shyliuli/ShyCPU)：ShyISA 的硬件实现，全部 RTL 由 ShyHDL 描述
 
 ## 许可
 
