@@ -202,7 +202,7 @@ impl Compiler {
                 }
                 // One path never wrote this signal. A module signal cannot be in
                 // that position: the coverage check rejects a design that leaves
-                // a driven bit unassigned on a path (REQ-LANG-015). It can only
+                // a driven bit unassigned on a path. It can only
                 // be a temporary of this process, and a read of that temporary
                 // on the path that skipped it is rejected as a read before
                 // assignment, so the value is dead on that path; the written
@@ -463,7 +463,7 @@ impl Compiler {
                 .unwrap_or_else(|| Bits::new(width));
             // Only the bits this process drove are written: another process may
             // own the remaining bits of the same signal, and a whole-vector
-            // assignment would collide with it (REQ-LANG-018 works per bit).
+            // assignment would collide with it.
             for (lo, hi) in owned.runs() {
                 self.convert_owner(signal, index, lo, hi);
                 let whole = lo == 0 && hi == width;

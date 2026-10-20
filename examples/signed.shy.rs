@@ -2,7 +2,7 @@
 //!
 //! Build it with `shyhdl build --top Signed8 examples/signed.shy.rs`.
 //!
-//! `int<W>` is a `W`-bit two's-complement value (REQ-LATER-003): same-width
+//! `int<W>` is a `W`-bit two's-complement value: same-width
 //! arithmetic wraps exactly as an ALU wraps, `>>` shifts the sign bit in, and
 //! the ordering comparisons read the values as signed. Signed and unsigned
 //! values are never combined silently: `as int<W>` / `as uint<W>` reinterprets

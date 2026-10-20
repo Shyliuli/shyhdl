@@ -209,7 +209,7 @@ fn adds() {
 - `delay`、`wait`、`wait_until`、`sample_after` 控制时间；`assert!` / `assert_eq!` 失败即
   终止该测试。
 - `pass!` / `finish!` 结束测试；没有 `finish!` 的测试靠超时判定失败。
-- 测试可以声明时间精度与时钟频率；工具链按 `tests/fixtures` 与示例的实际用法校验。
+- 测试可以声明时间精度与时钟频率；具体写法见示例。
 
 ## 语言边界
 

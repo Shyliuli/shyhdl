@@ -10,8 +10,6 @@ license = "MIT"
 readme = "README.md"
 keywords = ["hdl", "verilog", "hardware", "rtl", "dsl"]
 categories = ["hardware-support", "compilers"]
-# Requirements tracking is development material, not part of the published crate.
-exclude = ["REQUIREMENTS.md"]
 # `examples/*.shy.rs` are ShyHDL DSL inputs, not Rust example targets.
 autoexamples = false
 
@@ -43,7 +41,7 @@ members = [
 [workspace.lints.rust]
 # `cfg(rust_analyzer)` is set by rust-analyzer, never by rustc. Whitelisting it
 # keeps the analyzer-only branch free of `unexpected_cfgs` warnings.
-unexpected_cfgs = { level = "allow", check-cfg = ["cfg(rust_analyzer)"] }
+unexpected_cfgs = { level = "deny", check-cfg = ["cfg(rust_analyzer)"] }
 
 [dependencies]
 # Diagnostics: every error carries its path, source span or underlying cause.
@@ -56,24 +54,23 @@ serde_json = "1"
 # Command-line surface of the `shyhdl` binary.
 clap = { version = "4", features = ["derive"] }
 
-# The M1 frontend reads ShyHDL source as Rust syntax. `proc-macro2` is declared
+# The frontend reads ShyHDL source as Rust syntax. `proc-macro2` is declared
 # directly only to turn on `span-locations`, which is what gives `SourceSpan`
 # real line/column information. `quote` is deliberately absent: nothing emits
 # Rust tokens yet, add it when code generation actually needs it.
 syn = { version = "2", features = ["full", "extra-traits", "visit", "visit-mut"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 
-# Waveform reading for the record/replay layer (M0): VCD and FST, one parser,
-# no second waveform dependency. 0.25.7 is the latest 0.25.x in the index and
-# needs rustc 1.90; VCD/FST support is always compiled in (the only feature is
-# the optional `serde1`), so no feature selection is needed here.
+# Waveform reading for the record/replay layer: VCD and FST, one parser, no
+# second waveform dependency. 0.25.7 is the latest 0.25.x in the index and needs
+# rustc 1.90; VCD/FST support is always compiled in (the only feature is the
+# optional `serde1`), so no feature selection is needed here.
 wellen = "0.25"
 
-# Debugger (M0): a real GDB remote-serial-protocol stub, plus the ELF and DWARF
-# writers used to expose source-level variables to standard GDB commands
-# (REQ-DBG-050, REQ-DBG-051). Requested by the debugger worker; `write` is the
-# only feature needed, and the default x86_64 virtual target description comes
-# from `gdbstub_arch`.
+# Debugger: a real GDB remote-serial-protocol stub, plus the ELF and DWARF
+# writers used to expose source-level variables to standard GDB commands.
+# `write` is the only feature needed, and the default x86_64 virtual target
+# description comes from `gdbstub_arch`.
 gdbstub = "0.7.10"
 gdbstub_arch = "0.3.3"
 object = { version = "0.38", features = ["write"] }

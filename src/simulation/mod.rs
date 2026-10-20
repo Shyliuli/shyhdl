@@ -1,4 +1,4 @@
-//! M3: run a generated testbench together with the DUT on a real Verilog
+//! Run a generated testbench together with the DUT on a real Verilog
 //! simulator.
 //!
 //! The backend is a released Verilator, invoked directly
@@ -7,8 +7,8 @@
 //! no in-process embedding is claimed. Verilator owns time: the runner jumps from
 //! one scheduled time slot to the next
 //! (`VerilatedContext::time(nextTimeSlot())`), evaluates the model and dumps the
-//! waveform, so Rust never implements a second scheduler (REQ-SIM-001,
-//! REQ-SIM-002, REQ-SIM-003).
+//! waveform, so Rust never implements a second scheduler (,
+//!,).
 //!
 //! # What a run reports
 //!
@@ -16,8 +16,8 @@
 //! strictly, matching the test name and cross-checking the summary against the
 //! lines it saw, and classifies the result into [`Outcome::Pass`],
 //! [`Outcome::Fail`], [`Outcome::Timeout`], [`Outcome::Environment`],
-//! [`Outcome::CompileError`] or [`Outcome::SimulationError`] (REQ-TEST-008,
-//! REQ-TEST-009):
+//! [`Outcome::CompileError`] or [`Outcome::SimulationError`] (,
+//!):
 //!
 //! * a `SHYHDL_FAIL` line wins over everything else;
 //! * a non-zero exit code is a failure;
@@ -38,10 +38,8 @@
 //! build log, the waveform and [`RunManifest`]. Sources are never modified. The
 //! directory may be relative, may contain non-ASCII characters and is
 //! canonicalized once per run, because the tools are started with it as their
-//! working directory. `reuse_build` only skips re-running Verilator when the
-//! sources, the runner, the flags and the tool version are unchanged; a run and
-//! its waveform are always produced fresh, and a waveform from an earlier run is
-//! removed before the next one starts.
+//! working directory. A waveform from an earlier run is removed before the next
+//! one starts.
 //!
 //! # Known backend limitation
 //!
@@ -53,8 +51,8 @@
 //! containing spaces, build elsewhere: '/tmp/.../with space/out'
 //! ```
 //!
-//! The check is on the directory itself, so passing a relative `--Mdir .` with the
-//! build directory as the working directory does not avoid it (`make -C .` still
+//! The check is on the directory itself, so passing a relative `--Mdir.` with the
+//! build directory as the working directory does not avoid it (`make -C.` still
 //! fails at that line). Non-ASCII directory names work. This is a backend
 //! limitation reported as [`Outcome::CompileError`] with Verilator's own message
 //! in the build log; ShyHDL itself always passes an argument vector and never
@@ -65,15 +63,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result};
-use crate::metadata::{compute_build_id, SourceUnit};
 use crate::testbench::{DesignInfo, TestbenchArtifact};
 
 mod manifest;
 mod toolchain;
 
 pub use manifest::{
-    digest_file, load_manifest, write_manifest, ClockRef, DesignRef, ManifestPaths, RootMapping,
-    RunManifest, TestRef, WaveRef, MANIFEST_FILE, MANIFEST_SCHEMA, WAVE_DIGEST_PREFIX,
+    load_manifest, write_manifest, ClockRef, DesignRef, ManifestPaths, RootMapping, RunManifest,
+    TestRef, WaveRef, MANIFEST_FILE,
 };
 pub use manifest::{BackendRef, Counts, ParameterRef};
 use toolchain::{CommandOutcome, Toolchain};
@@ -84,8 +81,6 @@ const RUNNER_FILE: &str = "runner.cpp";
 const EXE_NAME: &str = "sim";
 /// Verilator build output kept for diagnosis.
 const BUILD_LOG: &str = "build.log";
-/// Marker file holding the build fingerprint of the last successful build.
-const BUILD_STAMP: &str = ".shyhdl_build_stamp";
 /// Safety net on the number of event steps a run may take; the wall-clock
 /// deadline is the primary bound.
 const MAX_STEPS: u64 = 100_000_000;
@@ -203,7 +198,7 @@ pub struct SimOptions {
     pub build_dir: PathBuf,
     /// DUT Verilog, in compile order.
     pub dut_sources: Vec<SourceFile>,
-    /// The generated testbench; compiled together with the DUT (REQ-VER-003).
+    /// The generated testbench; compiled together with the DUT.
     pub tb_source: SourceFile,
     /// Testbench metadata, including the waveform root mappings.
     pub testbench: TestBenchInfo,
@@ -211,8 +206,6 @@ pub struct SimOptions {
     pub design_top: String,
     /// Source-level name of the design top.
     pub design_top_source_name: String,
-    /// Build id from the frontend metadata; recorded, never recomputed.
-    pub design_build_id: Option<String>,
     /// Frontend metadata file (plain name inside `build_dir`) to pair with the
     /// recording.
     pub metadata_file: Option<String>,
@@ -228,10 +221,6 @@ pub struct SimOptions {
     pub parameters: Vec<(String, String)>,
     /// Sampling strategy description, recorded in the manifest.
     pub sampling: String,
-    /// Reuse the compiled model when sources, runner, flags and tool version are
-    /// unchanged. Only the executable is reused: the simulation always runs again
-    /// and its waveform and results are produced fresh.
-    pub reuse_build: bool,
 }
 
 impl SimOptions {
@@ -277,7 +266,6 @@ impl SimOptions {
             },
             design_top: design.top.clone(),
             design_top_source_name: design.top_source_name.clone(),
-            design_build_id: None,
             metadata_file: None,
             wave: WaveOption::None,
             timeout: Duration::from_secs(60),
@@ -287,7 +275,6 @@ impl SimOptions {
             sampling: "verilator --timing; the testbench samples after an edge with a positive \
                        settle offset (sample_after)"
                 .to_string(),
-            reuse_build: true,
         }
     }
 }
@@ -321,9 +308,6 @@ pub struct SimReport {
     pub wave_path: Option<PathBuf>,
     /// Time scale read back from the waveform header, for example `1ps`.
     pub wave_timescale: Option<String>,
-    /// Content digest of the waveform, the pairing identity recorded in the
-    /// manifest (see [`manifest::digest_file`]).
-    pub wave_digest: Option<String>,
     /// Manifest pairing this run with its design and waveform.
     pub manifest_path: PathBuf,
     /// Id of this run.
@@ -467,7 +451,7 @@ impl Simulator {
         if let Some(wave) = options.wave.file_name() {
             validate_file_name(wave)?;
         }
-        for reserved in [RUNNER_FILE, BUILD_LOG, EXE_NAME, BUILD_STAMP, MANIFEST_FILE] {
+        for reserved in [RUNNER_FILE, BUILD_LOG, EXE_NAME, MANIFEST_FILE] {
             if names.iter().any(|name| name == reserved) {
                 return Err(Error::TypeLayout {
                     message: format!(
@@ -511,7 +495,7 @@ impl Simulator {
             source,
         })?;
 
-        let run_id = make_run_id(options, &runner, &dut_paths, &tb_path);
+        let run_id = make_run_id();
         Ok(RunContext {
             build_dir: build_dir.clone(),
             tb_name: options.tb_source.name.clone(),
@@ -521,7 +505,6 @@ impl Simulator {
                 .map(|source| source.name.clone())
                 .collect(),
             metadata_file: options.metadata_file.clone(),
-            runner,
             dut_paths,
             tb_path,
             runner_path,
@@ -530,28 +513,10 @@ impl Simulator {
         })
     }
 
-    /// Build the model unless a previous identical build can be reused.
+    /// Build the model.
     fn build(&self, options: &SimOptions, context: &RunContext) -> Result<BuildResult> {
         let flags = self.verilator_flags(options, context);
-        let fingerprint = build_fingerprint(
-            &self.toolchain,
-            &flags,
-            &context.runner,
-            &context.dut_paths,
-            &context.tb_path,
-        );
         let exe = context.build_dir.join(EXE_NAME);
-        let stamp = context.build_dir.join(BUILD_STAMP);
-        let up_to_date = options.reuse_build
-            && exe.is_file()
-            && std::fs::read_to_string(&stamp)
-                .map(|text| text.trim() == fingerprint)
-                .unwrap_or(false);
-        if up_to_date {
-            return Ok(BuildResult::Ready {
-                commands: Vec::new(),
-            });
-        }
 
         let args: Vec<OsString> = flags.iter().map(OsString::from).collect();
         let outcome = self.toolchain.run_bounded(
@@ -612,10 +577,6 @@ impl Simulator {
                 command: outcome.command_line,
             });
         }
-        std::fs::write(&stamp, &fingerprint).map_err(|source| Error::Io {
-            path: stamp.clone(),
-            source,
-        })?;
         Ok(BuildResult::Ready {
             commands: vec![outcome.command_line],
         })
@@ -700,17 +661,11 @@ impl Simulator {
         let protocol = parse_protocol(&outcome.stdout, &options.testbench.name);
         let mut wave_written = wave_path.filter(|path| path.is_file());
         let mut wave_timescale = None;
-        let mut wave_digest = None;
         let mut wave_problem = None;
         if let Some(path) = wave_written.clone() {
-            match manifest::digest_file(&path).and_then(|digest| {
-                wave_digest = Some(digest);
-                read_vcd_timescale(&path)
-            }) {
+            match read_vcd_timescale(&path) {
                 Ok(scale) => wave_timescale = scale,
                 Err(error) => {
-                    // Keep the cause: the file exists but cannot be read back, so
-                    // the recording cannot be paired with this run.
                     wave_problem = Some(format!("the waveform cannot be read back: {error}"));
                 }
             }
@@ -723,7 +678,7 @@ impl Simulator {
         if let Some(problem) = wave_problem {
             // A failure or a timeout of the test itself stays the primary result;
             // an otherwise successful run that lost a requested artifact is not a
-            // pass (REQ-TEST-008).
+            // pass.
             if kind == Outcome::Pass {
                 kind = Outcome::SimulationError;
                 reason = format!("{problem}; the run is not reported as a pass without it");
@@ -745,7 +700,6 @@ impl Simulator {
             commands,
         );
         report.wave_timescale = wave_timescale;
-        report.wave_digest = wave_digest;
         context.write_manifest(options, &mut report)?;
         Ok(report)
     }
@@ -768,7 +722,6 @@ struct RunContext {
     tb_name: String,
     dut_names: Vec<String>,
     metadata_file: Option<String>,
-    runner: String,
     dut_paths: Vec<PathBuf>,
     tb_path: PathBuf,
     runner_path: PathBuf,
@@ -807,7 +760,6 @@ impl RunContext {
             stderr,
             wave_path,
             wave_timescale: None,
-            wave_digest: None,
             manifest_path: self.build_dir.join(MANIFEST_FILE),
             run_id: self.run_id.clone(),
             build_log_path: self.build_dir.join(BUILD_LOG),
@@ -819,12 +771,10 @@ impl RunContext {
     /// Write the manifest that pairs this run with its design and waveform.
     fn write_manifest(&self, options: &SimOptions, report: &mut SimReport) -> Result<()> {
         let manifest = RunManifest {
-            schema: MANIFEST_SCHEMA,
             run_id: self.run_id.clone(),
             design: DesignRef {
                 top: options.design_top.clone(),
                 top_source_name: options.design_top_source_name.clone(),
-                build_id: options.design_build_id.clone(),
             },
             test: TestRef {
                 name: options.testbench.name.clone(),
@@ -844,9 +794,6 @@ impl RunContext {
                 path: file_name_of(path),
                 format: "vcd".to_string(),
                 timescale_in_file: report.wave_timescale.clone(),
-                // The recorded file's own identity, so a stale manifest cannot be
-                // paired with a later recording that reused the same file name.
-                digest: report.wave_digest.clone().unwrap_or_default(),
             }),
             roots: options.testbench.roots.clone(),
             clocks: options.testbench.clocks.clone(),
@@ -1031,7 +978,7 @@ fn classify(
         );
     }
     // A failed assertion is the strongest evidence: it is reported even when the
-    // run also hit a deadline (REQ-TEST-008).
+    // run also hit a deadline.
     if protocol.fails > 0 {
         return (
             Outcome::Fail,
@@ -1098,8 +1045,8 @@ fn classify(
         return (
             Outcome::Fail,
             "the run ended without a single SHYHDL_PASS line, so it is not evidence of success \
-             (REQ-TEST-008)"
-                .to_string(),
+ "
+            .to_string(),
         );
     }
     let Some(summary) = protocol.summary else {
@@ -1210,72 +1157,13 @@ fn runner_source(top_type: &str) -> String {
     include_str!("runner_main.cpp").replace("@@TOP_TYPE@@", top_type)
 }
 
-/// Build fingerprint: sources, runner, flags and the tool version. A run result
-/// and a waveform are never reused, only the compiled model.
-fn build_fingerprint(
-    toolchain: &Toolchain,
-    flags: &[String],
-    runner: &str,
-    dut_paths: &[PathBuf],
-    tb_path: &Path,
-) -> String {
-    let mut units = Vec::new();
-    for path in dut_paths
-        .iter()
-        .map(PathBuf::as_path)
-        .chain(std::iter::once(tb_path))
-    {
-        let name = file_name_of(path);
-        let content = std::fs::read_to_string(path).unwrap_or_default();
-        units.push(SourceUnit {
-            path: format!("source/{name}"),
-            content,
-        });
-    }
-    units.push(SourceUnit {
-        path: "runner.cpp".to_string(),
-        content: runner.to_string(),
-    });
-    units.push(SourceUnit {
-        path: "build-flags".to_string(),
-        content: format!("{}\n{}", toolchain.verilator_version(), flags.join(" ")),
-    });
-    compute_build_id(&units)
-}
-
-/// A run id that is unique per invocation but stable in the manifest.
-fn make_run_id(
-    options: &SimOptions,
-    runner: &str,
-    dut_paths: &[PathBuf],
-    tb_path: &Path,
-) -> String {
-    let mut units = Vec::new();
-    for path in dut_paths
-        .iter()
-        .map(PathBuf::as_path)
-        .chain(std::iter::once(tb_path))
-    {
-        units.push(SourceUnit {
-            path: format!("source/{}", file_name_of(path)),
-            content: std::fs::read_to_string(path).unwrap_or_default(),
-        });
-    }
-    units.push(SourceUnit {
-        path: "runner.cpp".to_string(),
-        content: runner.to_string(),
-    });
-    units.push(SourceUnit {
-        path: "seed".to_string(),
-        content: format!("{:?}", options.seed),
-    });
-    let digest = compute_build_id(&units);
-    let tail = digest.rsplit('-').next().unwrap_or(&digest).to_string();
-    let seconds = SystemTime::now()
+/// A run id that is unique per invocation.
+fn make_run_id() -> String {
+    let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
+        .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    format!("run-{seconds}-{tail}")
+    format!("run-{nanos}")
 }
 
 /// Time scale recorded in a VCD header, for example `1ps`.
@@ -1297,135 +1185,4 @@ fn read_vcd_timescale(path: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(scale.to_string()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_options() -> SimOptions {
-        SimOptions {
-            build_dir: PathBuf::from("."),
-            dut_sources: vec![],
-            tb_source: SourceFile::new("tb.v", ""),
-            testbench: TestBenchInfo {
-                name: "mine".into(),
-                top: "tb".into(),
-                top_type: "Vtb".into(),
-                timeunit: "1ns".into(),
-                timeprecision: "1ps".into(),
-                roots: vec![],
-                clocks: vec![],
-            },
-            design_top: "d".into(),
-            design_top_source_name: "d".into(),
-            design_build_id: None,
-            metadata_file: None,
-            wave: WaveOption::None,
-            timeout: Duration::from_secs(1),
-            build_timeout: Duration::from_secs(1),
-            seed: None,
-            parameters: vec![],
-            sampling: String::new(),
-            reuse_build: false,
-        }
-    }
-
-    fn command_outcome(status: Option<i32>, timed_out: bool) -> CommandOutcome {
-        CommandOutcome {
-            status,
-            timed_out,
-            stdout: String::new(),
-            stderr: String::new(),
-            elapsed: Duration::from_millis(1),
-            command_line: "sim".into(),
-        }
-    }
-
-    #[test]
-    fn file_names_cannot_escape_the_build_directory() {
-        assert!(validate_file_name("dut.v").is_ok());
-        assert!(validate_file_name("../dut.v").is_err());
-        assert!(validate_file_name("/tmp/dut.v").is_err());
-        assert!(validate_file_name("sub/dut.v").is_err());
-        assert!(validate_file_name("dut.v\nSHYHDL_PASS").is_err());
-        assert!(validate_file_name("-o").is_err());
-        assert!(validate_file_name("..").is_err());
-    }
-
-    #[test]
-    fn protocol_lines_are_matched_to_the_test() {
-        let stdout = "\
-SHYHDL_PASS test=other case=1
-SHYHDL_PASS test=mine case=1
-SHYHDL_PASS test=mine case=2
-SHYHDL_FAIL test=mine case=3 check=assert_eq file=a.shy line=4 expected=0 actual=1
-SHYHDL_SUMMARY test=mine pass=3 fail=1 markers=2 expected_markers=2
-";
-        let protocol = parse_protocol(stdout, "mine");
-        assert_eq!(protocol.passes, 2);
-        assert_eq!(protocol.markers, 2);
-        assert_eq!(protocol.fails, 1);
-        assert_eq!(protocol.other_test_lines, 1);
-        assert_eq!(protocol.expected_markers, Some(2));
-    }
-
-    #[test]
-    fn summary_disagreement_is_not_a_pass() {
-        let options = test_options();
-        let outcome = command_outcome(Some(0), false);
-        let stdout = "SHYHDL_PASS test=mine case=finish\n\
-                      SHYHDL_SUMMARY test=mine pass=2 fail=0 markers=0 expected_markers=unknown\n\
-                      SHYHDL_RUNNER_DONE sim_time=1 steps=1 finish=1\n";
-        let (kind, reason) = classify(&options, &outcome, &parse_protocol(stdout, "mine"));
-        assert_eq!(kind, Outcome::Fail, "{reason}");
-        assert!(reason.contains("disagrees"), "{reason}");
-
-        let stdout = "SHYHDL_PASS test=mine case=finish\n\
-                      SHYHDL_SUMMARY test=mine pass=1 fail=0 markers=0 expected_markers=unknown\n\
-                      SHYHDL_RUNNER_DONE sim_time=1 steps=1 finish=1\n";
-        let (kind, reason) = classify(&options, &outcome, &parse_protocol(stdout, "mine"));
-        assert_eq!(kind, Outcome::Pass, "{reason}");
-    }
-
-    #[test]
-    fn missing_pass_marker_is_not_success() {
-        let options = test_options();
-        let outcome = command_outcome(Some(0), false);
-        let stdout = "SHYHDL_SUMMARY test=mine pass=0 fail=0 markers=0 expected_markers=unknown\n\
-                      SHYHDL_RUNNER_DONE sim_time=1 steps=1 finish=1\n";
-        let (kind, reason) = classify(&options, &outcome, &parse_protocol(stdout, "mine"));
-        assert_eq!(kind, Outcome::Fail, "{reason}");
-        assert!(reason.contains("without a single SHYHDL_PASS"), "{reason}");
-    }
-
-    #[test]
-    fn incomplete_cases_are_not_a_pass() {
-        let options = test_options();
-        let outcome = command_outcome(Some(0), false);
-        let stdout = "SHYHDL_PASS test=mine case=1\n\
-                      SHYHDL_SUMMARY test=mine pass=1 fail=0 markers=1 expected_markers=4\n\
-                      SHYHDL_RUNNER_DONE sim_time=1 steps=1 finish=1\n";
-        let (kind, reason) = classify(&options, &outcome, &parse_protocol(stdout, "mine"));
-        assert_eq!(kind, Outcome::Fail, "{reason}");
-        assert!(reason.contains("explicitly marked cases"), "{reason}");
-    }
-
-    #[test]
-    fn fail_wins_over_a_timeout() {
-        let options = test_options();
-        let timed_out = command_outcome(Some(124), true);
-        let stdout = "SHYHDL_FAIL test=mine case=1 check=assert file=a.shy line=3\n";
-        let (kind, _) = classify(&options, &timed_out, &parse_protocol(stdout, "mine"));
-        assert_eq!(kind, Outcome::Fail);
-
-        let (kind, reason) = classify(&options, &timed_out, &parse_protocol("", "mine"));
-        assert_eq!(kind, Outcome::Timeout, "{reason}");
-
-        // A plain SIGKILL is not a timeout.
-        let killed = command_outcome(Some(137), false);
-        let (kind, reason) = classify(&options, &killed, &parse_protocol("", "mine"));
-        assert_eq!(kind, Outcome::SimulationError, "{reason}");
-        assert!(reason.contains("out-of-memory"), "{reason}");
-    }
 }

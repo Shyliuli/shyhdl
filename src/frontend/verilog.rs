@@ -4,12 +4,11 @@
 //! hardware struct specialisation, one instantiation per `#[instance]` field,
 //! `assign` for continuous wiring, `always @(*)` for the default
 //! combinational logic and an
-//! edge-triggered `always` for `always!` (REQ-VER-001, REQ-VER-002, REQ-VER-005).
+//! edge-triggered `always` for `always!`.
 //!
 //! Names are the source names; the only names the compiler introduces are
 //! temporaries derived from a source position (`t_l12_c9`), never a hash
-//! (REQ-VER-009). Every generated item carries the source line it came from
-//! (REQ-VER-006).
+//! Every generated item carries the source line it came from.
 
 use std::fmt::Write as _;
 
@@ -102,7 +101,6 @@ fn emit_module(module: &Module, out: &mut String) {
 
     // Instances first, then the continuous wiring, then the processes: the
     // connection order in the source does not change the emitted topology
-    // (REQ-LANG-013).
     let mut wrote_section = false;
     for (index, instance) in module.instances.iter().enumerate() {
         let _ = index;
@@ -118,7 +116,7 @@ fn emit_module(module: &Module, out: &mut String) {
             let comma = if position + 1 == count { "" } else { "," };
             let _ = writeln!(
                 out,
-                "        .{}({}){comma}",
+                "       .{}({}){comma}",
                 connection.port,
                 expression(module, &connection.expr)
             );

@@ -3,7 +3,7 @@
 //! Everything a test writes is lowered here into plain Verilog-2005: `initial`
 //! and `always` processes, delays, event and condition waits, blocking and
 //! non-blocking assignments, assertions and the clock/reset wrappers. Time
-//! never advances on the Rust side (REQ-SIM-002): the generated testbench uses
+//! never advances on the Rust side: the generated testbench uses
 //! `#delay` and edge waits, and the simulator owns the event queue.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -305,7 +305,7 @@ impl<'a> Generator<'a> {
         self.reset_nets.contains(net)
     }
 
-    /// A source-located "this is not supported" error (REQ-VER-007).
+    /// A source-located "this is not supported" error.
     pub(super) fn error(&self, span: Span, message: impl Into<String>) -> Error {
         let mut message = message.into();
         let span = match SourceSpan::from_proc_macro2(&self.source_name, span) {
@@ -453,7 +453,7 @@ impl<'a> Generator<'a> {
                 if init.diverge.is_some() {
                     return Err(self.error(
                         init.expr.span(),
-                        "`let ... else` is not supported in a testbench",
+                        "`let... else` is not supported in a testbench",
                     ));
                 }
                 Some(init.expr.as_ref())
@@ -1025,7 +1025,7 @@ impl<'a> Generator<'a> {
     ///
     /// A condition that needs statements of its own (a `match`/`if` value inside it)
     /// cannot be written between `end` and `else if`, so the rest of the chain goes
-    /// into an `else begin .. end` block instead: those statements then run only
+    /// into an `else begin.. end` block instead: those statements then run only
     /// when the branch before them was not taken.
     fn lower_if(&mut self, item: &ExprIf, ctx: Ctx, out: &mut Emitter) -> Result<()> {
         self.require_procedural(ctx, item.span(), "`if`")?;
@@ -1139,7 +1139,7 @@ impl<'a> Generator<'a> {
             return Err(self.error(
                 item.expr.span(),
                 "`for` bounds must be integer literals so the loop has a fixed trip count \
-                 (REQ-LANG-046)",
+",
             ));
         };
         if !self.loop_vars.iter().any(|declared| declared == &var) {
@@ -2618,7 +2618,7 @@ impl<'a> Generator<'a> {
     }
 
     /// A `// file:line` comment, so the generated testbench keeps the
-    /// source-to-generated mapping (REQ-VER-006).
+    /// source-to-generated mapping.
     fn comment_at(&self, out: &mut Emitter, span: Span) -> Result<()> {
         let location = self.location(span)?;
         out.push(format!(
@@ -2728,7 +2728,7 @@ impl<'a> Generator<'a> {
                     return Err(self.error(
                         call.args[1].span(),
                         "`sample_after` needs a positive settle offset: `#0` is not a stability \
-                         barrier for non-blocking assignments (REQ-TEST-006); write \
+                         barrier for non-blocking assignments; write \
                          `sample_after(posedge(dut.clk), ps(1))`",
                     ));
                 }
@@ -2838,7 +2838,7 @@ impl<'a> Generator<'a> {
     ///
     /// Nothing is rounded: a frequency that does not divide one second into whole
     /// femtoseconds, a zero frequency, and an overflowing value are all rejected
-    /// with the source location of the offending argument (REQ-TEST-004).
+    /// with the source location of the offending argument.
     fn frequency_period(&self, expr: &Expr) -> Result<u64> {
         let Expr::Call(call) = expr else {
             return Err(self.error(
@@ -2904,7 +2904,7 @@ impl<'a> Generator<'a> {
     /// Lower a time value to a Verilog delay, exact in the test's time scale.
     ///
     /// A zero delay is legal Verilog and is emitted as `#0`; `sample_after`
-    /// refuses a zero settle offset separately (REQ-TEST-006).
+    /// refuses a zero settle offset separately.
     fn delay_text(&self, femtoseconds: u64, span: Span) -> Result<String> {
         if femtoseconds == 0 {
             return Ok("0".to_string());
@@ -3276,8 +3276,7 @@ impl<'a> Generator<'a> {
     /// Source location of a construct. A span without a location is reported
     /// instead of being guessed: a wrong `file:line` in the generated testbench
     /// and in the assertion output is worse than a failed generation
-    /// (`Error::MissingSourceLocation`, REQ-VER-007).
-    /// `file:line` for a generated comment, safe to paste after `//`.
+    /// /// `file:line` for a generated comment, safe to paste after `//`.
     fn location_text(&self, span: Span) -> Result<String> {
         let location = self.location(span)?;
         Ok(format!(
@@ -3555,7 +3554,7 @@ impl<'a> Generator<'a> {
             return Err(self.error(span, "`reset!` needs a positive `hold = ns(..)`"));
         }
         // The inactive level is driven for `setup` so the following 1 -> 0
-        // transition is real and observable (REQ-TEST-011), never inferred from
+        // transition is real and observable, never inferred from
         // an X initialisation.
         let setup = args.setup.unwrap_or_else(|| self.timeunit.femtoseconds());
         let setup_text = self.delay_text(setup, span)?;
@@ -3773,7 +3772,7 @@ impl Parse for ResetArgs {
             syn::Error::new(
                 signal.span(),
                 "`reset!` needs `hold = ns(..)`: the reset level must stay active across at least \
-                 one clock edge (REQ-TEST-011)",
+                 one clock edge",
             )
         })?;
         Ok(ResetArgs {
@@ -4436,7 +4435,7 @@ fn is_verilog_identifier(name: &str) -> bool {
 /// Verilator parses a SystemVerilog superset and rejects identifiers that are
 /// legal Verilog-2005 keywords only in name, so the full IEEE 1800-2017 keyword
 /// list is refused: a generated testbench that a real tool will not compile is a
-/// bug in the generator (REQ-SIM-010 keeps language semantics with the spec, and
+/// bug in the generator (keeps language semantics with the spec, and
 /// the generated names must still compile there).
 fn is_verilog_keyword(name: &str) -> bool {
     const KEYWORDS: &[&str] = &[
@@ -4807,9 +4806,9 @@ pub(super) fn render_expr(expr: &Expr) -> String {
             render_expr(&assign.left),
             render_expr(&assign.right)
         ),
-        Expr::If(_) => "if ...".to_string(),
-        Expr::ForLoop(_) => "for ...".to_string(),
-        Expr::Match(_) => "match ...".to_string(),
+        Expr::If(_) => "if...".to_string(),
+        Expr::ForLoop(_) => "for...".to_string(),
+        Expr::Match(_) => "match...".to_string(),
         Expr::Block(_) => "block".to_string(),
         Expr::Reference(reference) => format!("&{}", render_expr(&reference.expr)),
         Expr::Array(_) => "array".to_string(),

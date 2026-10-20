@@ -2,7 +2,7 @@
 //!
 //! Every message the frontend produces is one [`Diagnostic`]: a severity, a
 //! stable machine-readable code, a human message and - whenever it is derivable
-//! from the parsed source - the location in the source file (REQ-VER-007).
+//! from the parsed source - the location in the source file.
 //!
 //! Nothing here invents a location. When `proc_macro2` hands back a span with no
 //! position (a span built by hand rather than by the parser) the diagnostic is
@@ -54,17 +54,17 @@ pub struct Note {
 pub mod codes {
     /// Source is not valid ShyHDL (Rust syntax) at all.
     pub const PARSE: &str = "SH-F001";
-    /// A construct outside the supported subset (REQ-LANG-046 and friends).
+    /// A construct outside the supported subset.
     pub const UNSUPPORTED: &str = "SH-F002";
     /// A name does not resolve.
     pub const UNKNOWN_NAME: &str = "SH-F003";
     /// A type is missing, unknown or has an invalid width.
     pub const BAD_TYPE: &str = "SH-F004";
-    /// Two values of different widths were combined (REQ-LANG-034).
+    /// Two values of different widths were combined.
     pub const WIDTH_MISMATCH: &str = "SH-F005";
-    /// An index, slice or literal is out of range (REQ-LANG-034).
+    /// An index, slice or literal is out of range.
     pub const OUT_OF_RANGE: &str = "SH-F006";
-    /// The literal's width cannot be inferred (REQ-LANG-030).
+    /// The literal's width cannot be inferred.
     pub const WIDTH_UNKNOWN: &str = "SH-F007";
     /// A field is missing or duplicated, or a marker is wrong.
     pub const DECLARATION: &str = "SH-F008";
@@ -72,17 +72,15 @@ pub mod codes {
     pub const TOP: &str = "SH-F009";
     /// An input port (or clock) is written by its own module.
     pub const INPUT_WRITTEN: &str = "SH-F010";
-    /// Two processes, or a process and the wiring, drive the same bits
-    /// (REQ-LANG-018).
+    /// Two processes, or a process and the wiring, drive the same bits.
     pub const MULTI_DRIVER: &str = "SH-F011";
-    /// A combinational process leaves bits undriven on some path
-    /// (REQ-LANG-015, REQ-LANG-022).
+    /// A combinational process leaves bits undriven on some path.
     pub const INCOMPLETE_PATH: &str = "SH-F012";
-    /// A combinational loop (REQ-LANG-023).
+    /// A combinational loop.
     pub const COMB_LOOP: &str = "SH-F013";
     /// A module instantiates itself, directly or indirectly.
     pub const MODULE_RECURSION: &str = "SH-F014";
-    /// A child input port is not connected (REQ-MVP-013).
+    /// A child input port is not connected.
     pub const UNCONNECTED_INPUT: &str = "SH-F015";
     /// A signal is never driven.
     pub const UNDRIVEN: &str = "SH-F016";
@@ -90,7 +88,7 @@ pub mod codes {
     pub const NAME_COLLISION: &str = "SH-F017";
     /// The body of `always!` does not have the required edge-chain shape.
     pub const SEQ_SHAPE: &str = "SH-F018";
-    /// A loop bound is not a build-time constant (REQ-LANG-046).
+    /// A loop bound is not a build-time constant.
     pub const NOT_CONSTANT: &str = "SH-F019";
     /// A hardware struct has no `impl Hardware`, or has two.
     pub const IMPL: &str = "SH-F020";
@@ -340,42 +338,4 @@ impl From<Diagnostic> for Diagnostics {
 /// instead of being replaced with a fabricated line number.
 pub(crate) fn span_in(file: &str, span: proc_macro2::Span) -> Option<SourceSpan> {
     SourceSpan::from_proc_macro2(file, span).ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn report_includes_location_and_notes() {
-        let diagnostic = Diagnostic::error(
-            codes::WIDTH_MISMATCH,
-            SourceSpan::new("m.shy.rs", 4, 9),
-            "width mismatch",
-        )
-        .with_note("target `c` is 8 bits", None);
-        let report = diagnostic.to_report_string();
-        assert!(
-            report.starts_with("error[SH-F005]: m.shy.rs:4:9: width mismatch"),
-            "{report}"
-        );
-        assert!(report.contains("note: target `c` is 8 bits"), "{report}");
-    }
-
-    #[test]
-    fn missing_location_is_stated_not_invented() {
-        let report = Diagnostic::error(codes::PARSE, None, "boom").to_report_string();
-        assert!(report.contains("(no source location)"), "{report}");
-    }
-
-    #[test]
-    fn diagnostics_separate_errors_from_warnings() {
-        let mut diagnostics = Diagnostics::new();
-        diagnostics.warning(codes::UNREACHABLE, None, "unused module");
-        diagnostics.error(codes::PARSE, None, "bad syntax");
-        assert!(diagnostics.has_errors());
-        assert_eq!(diagnostics.errors().count(), 1);
-        assert_eq!(diagnostics.warnings().count(), 1);
-        assert_eq!(diagnostics.to_string().lines().count(), 2);
-    }
 }

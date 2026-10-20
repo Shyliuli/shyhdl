@@ -2,7 +2,7 @@
 //!
 //! The server owns the engine and the symbol layout, binds a loopback socket,
 //! and answers RSP from [`crate::debugger::target::ReplayTarget`]. Only one GDB
-//! is served at a time: the cursor is a single global position (REQ-DBG-002).
+//! is served at a time: the cursor is a single global position.
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
@@ -33,8 +33,7 @@ pub struct SignalBinding {
     /// Metadata variable id -> recording signal.
     pub signal_of_var: HashMap<String, SignalId>,
     /// Variables with no signal in this recording. They get no symbol at all,
-    /// so GDB reports them as unavailable instead of printing a zero
-    /// (REQ-DBG-005, AC-MVP-033).
+    /// so GDB reports them as unavailable instead of printing a zero.
     pub unavailable: Vec<String>,
 }
 
@@ -90,7 +89,7 @@ pub fn bind_signals(
 /// metadata root is the design itself (`top`). The mapping is explicit, because
 /// guessing a waveform path from a metadata path by suffix matching would
 /// silently pick the wrong instance when two instances share a name
-/// (REQ-DBG-026). An instance path the mapping cannot place is an error.
+/// An instance path the mapping cannot place is an error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootMapping {
     /// Instance-path root used by the metadata, for example `top`.
@@ -157,8 +156,8 @@ pub struct DebugOptions {
     pub port: u16,
     /// Mapping from metadata paths to recording paths.
     pub root: RootMapping,
-    /// Where to write the debug ELF. Defaults to a file named after the design
-    /// build id under the system temporary directory.
+    /// Where to write the debug ELF. Defaults to a file under the system
+    /// temporary directory.
     pub symbol_elf: Option<PathBuf>,
 }
 
@@ -235,9 +234,7 @@ impl DebugServer {
             None => {
                 // One directory per server: two sessions (two runs of the same
                 // design, or two runs of one process) must not overwrite each
-                // other's symbols. The directory name deliberately carries no
-                // part of `build_id`: it is caller-supplied text and is not
-                // validated for use as a file name here.
+                // other's symbols.
                 let dir = std::env::temp_dir().join(format!(
                     "shyhdl-debug-{}-{}",
                     std::process::id(),
@@ -287,7 +284,7 @@ impl DebugServer {
     /// who copies this line then gets an explicit reason the moment a write is
     /// attempted, instead of GDB's generic server error. That reason is GDB's
     /// ("Writing not allowed"), not the replay's: it is a client-side guard, and
-    /// the server still refuses every write itself (REQ-DBG-011), which is what
+    /// the server still refuses every write itself, which is what
     /// actually keeps the replay read-only.
     pub fn gdb_argv(&self) -> Vec<String> {
         vec![

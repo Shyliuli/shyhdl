@@ -3,7 +3,7 @@
 //! Two tools are needed and both are discovered explicitly instead of being
 //! guessed:
 //!
-//! * `verilator` (the simulation backend, REQ-SIM-001) - from `$SHYHDL_VERILATOR`,
+//! * `verilator` - from `$SHYHDL_VERILATOR`,
 //!   then `$VERILATOR`, then `PATH`. No repository-relative or machine-specific
 //!   path is baked in: where the tools live is a deployment decision.
 //! * GNU coreutils `timeout` - used to bound both the build and the run. It runs
@@ -59,7 +59,7 @@ impl CommandOutcome {
 
 impl Toolchain {
     /// Find the tools, or report exactly what is missing and where it was looked
-    /// for (an environment problem is reported as one, REQ-TEST-009).
+    /// for.
     pub fn discover() -> Result<Self> {
         let verilator = discover_verilator()?;
         let output = Command::new(&verilator)
@@ -100,8 +100,7 @@ impl Toolchain {
         &self.verilator
     }
 
-    /// Version line of that Verilator (recorded so a run can be reproduced,
-    /// REQ-SIM-009).
+    /// Version line of that Verilator (recorded so a run can be reproduced,.
     pub fn verilator_version(&self) -> &str {
         &self.version
     }

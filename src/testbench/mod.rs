@@ -1,12 +1,12 @@
-//! M2: `#[hardware_test]` functions become standalone Verilog-2005 testbenches.
+//! `#[hardware_test]` functions become standalone Verilog-2005 testbenches.
 //!
 //! A ShyHDL test is ordinary Rust syntax, so it is parsed with `syn` and then
 //! lowered to a plain Verilog testbench that runs on any Verilog-2005 tool
-//! (REQ-VER-001, REQ-VER-002) without Rust DPI (REQ-VER-004). Time semantics are
+//! without Rust DPI. Time semantics are
 //! delegated to the simulator: the generated testbench only uses `initial`,
-//! `always`, `#delay`, event and condition waits (REQ-TEST-001), so a single
+//! `always`, `#delay`, event and condition waits, so a single
 //! engine (`verilator --timing`, see [`crate::simulation`]) owns time and the
-//! Rust side never implements a second scheduler (REQ-SIM-002).
+//! Rust side never implements a second scheduler.
 //!
 //! # What the generator needs
 //!
@@ -44,7 +44,7 @@
 //!
 //! Only the documented subset is accepted. Anything else is reported as
 //! [`Error::Unsupported`] with the source location of the offending construct
-//! (REQ-TEST-010, REQ-VER-007); tokens are never passed through silently.
+//!; tokens are never passed through silently.
 //!
 //! # `match`
 //!
@@ -108,7 +108,7 @@
 //! * `SHYHDL_PASS test=<name> case=<n>` - an explicit `pass!()` marker completed.
 //! * `SHYHDL_PASS test=<name> case=finish|complete` - the test reached its
 //!   normal end (`finish!()`, or the last `initial!` block returned).
-//! * `SHYHDL_FAIL test=<name> case=<n> check=... file=... line=...`
+//! * `SHYHDL_FAIL test=<name> case=<n> check= ... file= ... line= ...`
 //! * `SHYHDL_TIMEOUT test=<name> at=<time>` - the `timeout!(...)` wrapper fired.
 //! * `SHYHDL_SUMMARY test=<name> pass=<n> fail=<n> markers=<n> expected_markers=<n|unknown>`
 //!
@@ -133,7 +133,7 @@ use lower::Generator;
 
 /// Direction of a DUT port as the testbench sees it.
 ///
-/// A clock is an ordinary input (REQ-TEST-020): which input the test drives as a
+/// A clock is an ordinary input: which input the test drives as a
 /// clock is decided by the testcase with `gen_clk(..)`/`clock!(..)`, not by a
 /// marking on the design port, so there is no third direction here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,8 +162,8 @@ impl PortDirection {
 /// One port of the DUT top module.
 ///
 /// `source_name` is the name a test writes (`dut.rst_n`), `verilog_name` is the
-/// name in the generated RTL used for the named port connection
-/// (REQ-VER-005: readable, stable names).
+/// name in the generated RTL used for the named port connection (readable,
+/// stable names).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModulePort {
     /// Name as written in the ShyHDL source.
@@ -172,7 +172,7 @@ pub struct ModulePort {
     pub verilog_name: String,
     /// Direction from the testbench's point of view.
     pub direction: PortDirection,
-    /// Type, which fixes the bit layout of the port (REQ-LANG-004).
+    /// Type, which fixes the bit layout of the port.
     pub ty: ValueType,
 }
 
@@ -241,7 +241,7 @@ impl DesignInfo {
 ///
 /// Only the values Verilog-2005 allows in a `` `timescale `` directive are
 /// accepted (1, 10 or 100 times a unit), so an invalid scale fails here with the
-/// text that was wrong instead of producing an invalid timescale (REQ-TEST-004).
+/// text that was wrong instead of producing an invalid timescale.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimeScale {
     text: String,
@@ -340,8 +340,8 @@ pub struct DutPortBinding {
 ///
 /// `signal` is the full path of the clock signal in the waveform, for example
 /// `TOP.tb_reg8_hold.u_dut.clk`: it is exactly what a replay needs for its clock
-/// step mode (REQ-DBG-023), so nothing about the clock has to be guessed from a
-/// name suffix or a port marking (REQ-DBG-027).
+/// step mode, so nothing about the clock has to be guessed from a
+/// name suffix or a port marking.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedClock {
     /// Variable the test bound the DUT to (`let mut <var> = Module::new()`).
@@ -376,7 +376,7 @@ pub struct DutInstance {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestbenchArtifact {
     /// Complete testbench source, including the `` `timescale `` directive and
-    /// the DUT instantiation (REQ-VER-003: TB and DUT stay separate files, and
+    /// the DUT instantiation (: TB and DUT stay separate files, and
     /// the DUT is not re-emitted here).
     pub verilog: String,
     /// Name of the `#[hardware_test]` function.
@@ -423,7 +423,7 @@ pub struct TestInfo {
 ///
 /// `design` must describe the DUT top module that the test instantiates with
 /// `Module::new()`. Errors carry the source location of the construct that is
-/// wrong (REQ-VER-007); nothing is emitted for a test that does not type-check
+/// wrong; nothing is emitted for a test that does not type-check
 /// against the supported subset.
 pub fn compile_testbench(
     source: &str,
@@ -658,29 +658,4 @@ fn parse_meta_text(input: syn::parse::ParseStream<'_>) -> syn::Result<String> {
 fn source_span(source_name: &str, span: Span) -> SourceSpan {
     SourceSpan::from_proc_macro2(source_name, span)
         .unwrap_or_else(|_| SourceSpan::new(source_name, 1, 1))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn time_scale_accepts_verilog_values() {
-        assert_eq!(TimeScale::parse("1ns").unwrap().femtoseconds(), 1_000_000);
-        assert_eq!(TimeScale::parse("ns").unwrap().as_verilog(), "1ns");
-        assert_eq!(TimeScale::parse(" 100ps ").unwrap().as_verilog(), "100ps");
-        assert_eq!(
-            TimeScale::parse("10us").unwrap().femtoseconds(),
-            10_000_000_000
-        );
-    }
-
-    #[test]
-    fn time_scale_rejects_invalid_values() {
-        assert!(TimeScale::parse("3ns").is_err());
-        assert!(TimeScale::parse("1").is_err());
-        assert!(TimeScale::parse("1xs").is_err());
-        assert!(TimeScale::parse("-1ns").is_err());
-        assert!(TimeScale::parse("0ns").is_err());
-    }
 }

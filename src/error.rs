@@ -31,8 +31,7 @@ pub enum Error {
         source: syn::Error,
     },
 
-    /// A construct outside the supported subset, located in source
-    /// (REQ-LANG-046, REQ-DBG-059).
+    /// A construct outside the supported subset, located in source.
     #[error("unsupported construct at {span}: {message}")]
     Unsupported {
         /// Location of the offending construct.
@@ -41,8 +40,8 @@ pub enum Error {
         message: String,
     },
 
-    /// A type has no valid fixed bit width, or its width does not fit
-    /// (REQ-LANG-034). See `ValueType::bit_width`.
+    /// A type has no valid fixed bit width, or its width does not fit. See
+    /// `ValueType::bit_width`.
     #[error("type layout error: {message}")]
     TypeLayout {
         /// What went wrong.
@@ -51,8 +50,7 @@ pub enum Error {
         span: Option<SourceSpan>,
     },
 
-    /// Loaded metadata is internally inconsistent and cannot drive the debugger,
-    /// for example a duplicate variable id. See `DesignMetadata::validate`.
+    /// Loaded metadata is inconsistent or does not describe the recording.
     #[error("invalid design metadata: {message}")]
     InvalidMetadata {
         /// What is inconsistent.
@@ -69,27 +67,6 @@ pub enum Error {
         source: serde_json::Error,
     },
 
-    /// The recording and the symbols come from different builds, so replay is
-    /// refused (REQ-DBG-010).
-    #[error("build id mismatch: symbols are from {expected}, recording is from {found}")]
-    BuildIdMismatch {
-        /// Build id of the symbols being used.
-        expected: String,
-        /// Build id recorded in the artifact.
-        found: String,
-    },
-
-    /// The artifact was written by a build with a different metadata schema.
-    #[error(
-        "metadata schema version {found} is not supported, this build reads version {expected}"
-    )]
-    SchemaVersion {
-        /// Version this build understands.
-        expected: u32,
-        /// Version found in the artifact.
-        found: u32,
-    },
-
     /// A source location was requested from a span that has none.
     #[error("no source location available for {file}")]
     MissingSourceLocation {
@@ -97,12 +74,11 @@ pub enum Error {
         file: String,
     },
 
-    /// Functionality that is planned but absent from this build. Reported as an
-    /// error so an unimplemented path can never look like a successful run.
-    #[error("{feature} is not implemented in this build")]
-    NotImplemented {
-        /// What is missing, named after the milestone that owns it.
-        feature: &'static str,
+    /// Something the caller asked for is not available in this run.
+    #[error("{message}")]
+    Unavailable {
+        /// What is missing.
+        message: &'static str,
     },
 
     /// The optional NVBoard backend could not build, start or keep running. The

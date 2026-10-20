@@ -898,7 +898,7 @@ impl Compiler {
                 )),
             },
             // `Option<T>` and `Result<T, E>` are part of the language: the
-            // source never declares them (REQ-LANG-043).
+            // source never declares them.
             "Option" => {
                 let arguments = self.builtin_arguments(segment, "Option", 1, &span)?;
                 let payload = self.resolve_type(arguments[0], span.clone())?;
@@ -993,7 +993,7 @@ impl Compiler {
                         Some(span),
                         format!("unknown type `{other}`"),
                     )
-                    .with_note(
+                .with_note(
                         "hardware types are `bool`, `uint<N>`, `int<N>`, `[T; N]`, enums and plain data structs",
                         None,
                     ));
@@ -1007,7 +1007,7 @@ impl Compiler {
     ///
     /// The length is a build-time constant, and the total width is checked as a
     /// product, so a wide element type times a long length is refused instead of
-    /// wrapping (REQ-LANG-047).
+    /// wrapping.
     fn resolve_array_type(
         &mut self,
         array: &syn::TypeArray,
@@ -1199,7 +1199,7 @@ impl Compiler {
     }
 
     /// An enum type from its variants: the tag width the variant count needs,
-    /// and a total width checked like an array's (REQ-LANG-040).
+    /// and a total width checked like an array's.
     fn enum_type(
         &self,
         name: String,
@@ -1332,7 +1332,7 @@ impl Compiler {
             let variant_name = variant.ident.to_string();
             // An explicit discriminant is an encoding of its own: tags are the
             // declaration order here, and a custom encoding is not a feature
-            // (REQ-LANG-040). Say so instead of silently renumbering it.
+            // Say so instead of silently renumbering it.
             if let Some((_, value)) = &variant.discriminant {
                 return Err(Diagnostic::error(
                     codes::UNSUPPORTED,
@@ -1455,7 +1455,7 @@ impl Compiler {
 }
 
 /// The tag width a number of variants needs: at least one bit, and enough bits
-/// to name every variant (REQ-LANG-040).
+/// to name every variant.
 fn tag_width_for(variants: usize) -> u32 {
     let mut width = 1u32;
     while width < 64 && (1u64 << width) < variants as u64 {

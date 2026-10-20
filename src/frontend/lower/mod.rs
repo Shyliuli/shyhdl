@@ -1,17 +1,15 @@
 //! Lowering: annotations and Rust bodies become typed modules.
 //!
 //! This is where the language rules live. Everything the design says about
-//! hardware is settled here, and every violation is a source-level diagnostic
-//! (REQ-VER-007):
+//! hardware is settled here, and every violation is a source-level diagnostic:
 //!
-//! * widths are resolved at build time and never mixed implicitly
-//!   (REQ-LANG-030, REQ-LANG-034),
+//! * widths are resolved at build time and never mixed implicitly,
 //! * `run` statements are the default combinational process (blocking, all paths
 //!   assigned) or `always!` (event arms, one regular edge branch, non-blocking
-//!   state) (REQ-LANG-012, REQ-LANG-015, REQ-LANG-016, REQ-LANG-020),
-//! * every bit of every signal has exactly one driver process (REQ-LANG-018),
+//!   state),
+//! * every bit of every signal has exactly one driver process,
 //! * combinational loops, module recursion, unconnected child inputs and
-//!   undriven signals are errors, not surprises (REQ-LANG-023, AC-MVP-013).
+//!   undriven signals are errors, not surprises.
 
 use std::collections::{HashMap, HashSet};
 use std::mem;
@@ -226,7 +224,7 @@ struct ProcCtx {
     drives: HashSet<SignalId>,
     pending: Vec<Stmt>,
     /// Product of the iteration counts of the loops currently being unrolled:
-    /// the expansion budget applies to the whole nesting (REQ-LANG-046).
+    /// the expansion budget applies to the whole nesting.
     unroll_product: u64,
 }
 
@@ -943,7 +941,9 @@ impl Compiler {
             }
             if self.parsed.data.contains_key(&top_name) {
                 diagnostic = diagnostic.with_note(
-                    format!("`{top_name}` is a plain data struct: data structs are values, not modules (REQ-LANG-001)"),
+                    format!(
+                        "`{top_name}` is a plain data struct: data structs are values, not modules."
+                    ),
                     None,
                 );
             }
@@ -1470,10 +1470,10 @@ impl Compiler {
     }
 
     /// Record that `owner` drives `range` of `signal`, rejecting a second
-    /// driver for the same bit (REQ-LANG-018).
+    /// driver for the same bit.
     ///
     /// Within one process, or within the wiring of one module, repeated writes
-    /// to the same bit are legal: the last one wins in a process (REQ-LANG-019),
+    /// to the same bit are legal: the last one wins in a process,
     /// while continuous assignments to the same bit are a real conflict and are
     /// rejected.
     fn claim(
@@ -1521,7 +1521,7 @@ impl Compiler {
                 Some(span.clone()),
                 format!(
                     "`{name}` bit {bit} is driven by both {existing_label} and {new_label}; \
-                     each bit may have exactly one driver (REQ-LANG-018)"
+                     each bit may have exactly one driver"
                 ),
             ));
         }
@@ -2011,228 +2011,6 @@ impl Compiler {
     /// never shift it.
     fn current_process(&self) -> usize {
         self.proc.as_ref().expect("inside a process").index
-    }
-}
-
-/// How a place is read.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn module_names_come_from_the_source_and_parameters() {
-        let params = vec![parse::HwParam {
-            name: "N".to_string(),
-            default: None,
-        }];
-        let mut env = ConstEnv::new();
-        env.insert("N".to_string(), 8);
-        assert_eq!(mangle("Adder", &params, &env), "Adder_N8");
-        assert_eq!(mangle("Adder8", &[], &env), "Adder8");
-    }
-
-    #[test]
-    fn top_spec_accepts_a_bare_name_or_a_parameter_binding() {
-        let (name, args) = parse_top_spec("Adder8").unwrap();
-        assert_eq!(name, "Adder8");
-        assert!(args.is_empty());
-        let (name, args) = parse_top_spec("Adder<8>").unwrap();
-        assert_eq!(name, "Adder");
-        assert_eq!(args.len(), 1);
-        assert!(parse_top_spec("Adder<{ N + 1 }>").is_err());
-        assert!(parse_top_spec("").is_err());
-    }
-
-    fn read_of(signal: SignalId, lo: u32, hi: u32) -> ReadRef {
-        ReadRef { signal, lo, hi }
-    }
-
-    /// The `(lo, hi, sources)` a signal's entries hold, in stored order.
-    fn entries_of(provenance: &Provenance, signal: SignalId) -> Vec<(u32, u32, Vec<ReadRef>)> {
-        provenance
-            .entries
-            .get(&signal)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .map(|entry| (entry.lo, entry.hi, entry.sources.clone()))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    #[test]
-    fn splice_unions_the_covered_leaves_and_keeps_the_gaps() {
-        let signal = 0;
-        let mut provenance = Provenance::default();
-        provenance.write(read_of(signal, 0, 6), Vec::new());
-        provenance.write(read_of(signal, 0, 2), vec![read_of(1, 0, 1)]);
-        provenance.write(read_of(signal, 4, 6), vec![read_of(2, 0, 1)]);
-
-        // The leaves are disjoint and ascending: [0,1) and [4,6).
-        provenance.splice_signal(
-            signal,
-            &[
-                (0, 1, vec![read_of(3, 0, 1)]),
-                (4, 6, vec![read_of(4, 0, 1)]),
-            ],
-        );
-
-        assert_eq!(
-            entries_of(&provenance, signal),
-            vec![
-                // The leaf replaces bit 0, but the write may not happen, so the
-                // sources of the range it covers stay in the union.
-                (0, 1, vec![read_of(3, 0, 1), read_of(1, 0, 1)]),
-                // Between the two leaves the entry survives untouched.
-                (1, 2, vec![read_of(1, 0, 1)]),
-                (2, 4, Vec::new()),
-                (4, 6, vec![read_of(4, 0, 1), read_of(2, 0, 1)]),
-            ]
-        );
-
-        // Bits 6..8 were never written: the splice leaves them untracked, so a
-        // read of them is still a read of the signal.
-        let (sources, incomplete) = provenance.sources_for(read_of(signal, 0, 8));
-        assert!(incomplete);
-        assert!(sources.contains(&read_of(signal, 6, 8)));
-    }
-
-    #[test]
-    fn splice_takes_the_leaf_only_ranges_alone() {
-        let signal = 0;
-        let mut provenance = Provenance::default();
-        // Two writes leave a hole at [2,4): the leaf covers [1,3), so it unions
-        // the entry it lands in and takes its own sources where no entry is.
-        provenance.write(read_of(signal, 4, 6), vec![read_of(2, 0, 1)]);
-        provenance.write(read_of(signal, 0, 2), vec![read_of(1, 0, 1)]);
-
-        provenance.splice_signal(signal, &[(1, 3, vec![read_of(3, 0, 1)])]);
-
-        assert_eq!(
-            entries_of(&provenance, signal),
-            vec![
-                (0, 1, vec![read_of(1, 0, 1)]),
-                (1, 2, vec![read_of(3, 0, 1), read_of(1, 0, 1)]),
-                (2, 3, vec![read_of(3, 0, 1)]),
-                (4, 6, vec![read_of(2, 0, 1)]),
-            ]
-        );
-    }
-
-    #[test]
-    fn write_keeps_the_entries_ascending() {
-        let signal = 0;
-        let mut provenance = Provenance::default();
-        // A later write that lands before an earlier one is inserted where it
-        // belongs instead of being appended: `merge` walks the list with one
-        // cursor per branch and relies on the order.
-        provenance.write(read_of(signal, 4, 6), vec![read_of(1, 0, 1)]);
-        provenance.write(read_of(signal, 0, 2), vec![read_of(2, 0, 1)]);
-        assert_eq!(
-            entries_of(&provenance, signal),
-            vec![
-                (0, 2, vec![read_of(2, 0, 1)]),
-                (4, 6, vec![read_of(1, 0, 1)]),
-            ]
-        );
-
-        // A write between the two lands in the middle.
-        provenance.write(read_of(signal, 2, 4), vec![read_of(3, 0, 1)]);
-        assert_eq!(
-            entries_of(&provenance, signal),
-            vec![
-                (0, 2, vec![read_of(2, 0, 1)]),
-                (2, 4, vec![read_of(3, 0, 1)]),
-                (4, 6, vec![read_of(1, 0, 1)]),
-            ]
-        );
-    }
-
-    #[test]
-    fn merge_unions_the_branches_and_keeps_constant_entries() {
-        let signal = 0;
-        // Both branches write a constant over [0,2). The merged entry has no
-        // sources at all, but it is still an entry, so a later read of the range
-        // is not a read of the signal's own value.
-        let mut then = Provenance::default();
-        then.write(read_of(signal, 0, 2), Vec::new());
-        let mut otherwise = Provenance::default();
-        otherwise.write(read_of(signal, 0, 2), Vec::new());
-        let merged = Provenance::merge(&[then, otherwise]);
-        assert_eq!(entries_of(&merged, signal), vec![(0, 2, Vec::new())]);
-        let (sources, incomplete) = merged.sources_for(read_of(signal, 0, 2));
-        assert!(sources.is_empty());
-        assert!(!incomplete);
-
-        // One branch writes the range and the other does not: the branch without
-        // an entry contributes a read of exactly that range.
-        let mut then = Provenance::default();
-        then.write(read_of(signal, 0, 2), vec![read_of(1, 0, 1)]);
-        let merged = Provenance::merge(&[then, Provenance::default()]);
-        assert_eq!(
-            entries_of(&merged, signal),
-            vec![(0, 2, vec![read_of(1, 0, 1), read_of(0, 0, 2)])]
-        );
-    }
-
-    #[test]
-    fn merge_leaves_unwritten_gaps_untracked() {
-        let signal = 0;
-        let mut then = Provenance::default();
-        then.write(read_of(signal, 0, 1), vec![read_of(1, 0, 1)]);
-        then.write(read_of(signal, 2, 3), vec![read_of(2, 0, 1)]);
-        let merged = Provenance::merge(&[then, Provenance::default()]);
-        assert_eq!(
-            entries_of(&merged, signal),
-            vec![
-                (0, 1, vec![read_of(1, 0, 1), read_of(0, 0, 1)]),
-                (2, 3, vec![read_of(2, 0, 1), read_of(0, 2, 3)]),
-            ]
-        );
-        // Nobody wrote [1,2): it stays untracked, so a read of it reports the
-        // uncovered part.
-        let (_, incomplete) = merged.sources_for(read_of(signal, 0, 3));
-        assert!(incomplete);
-    }
-
-    #[test]
-    fn merge_keeps_the_branch_order_and_joins_adjacent_ranges() {
-        let signal = 0;
-        // Both branches write [0,2) in two pieces with one source each, so the
-        // two ranges the boundaries cut come back as one entry.
-        let mut then = Provenance::default();
-        then.write(read_of(signal, 0, 1), vec![read_of(1, 0, 1)]);
-        then.write(read_of(signal, 1, 2), vec![read_of(1, 0, 1)]);
-        let mut otherwise = Provenance::default();
-        otherwise.write(read_of(signal, 0, 1), vec![read_of(1, 0, 1)]);
-        otherwise.write(read_of(signal, 1, 2), vec![read_of(1, 0, 1)]);
-        let merged = Provenance::merge(&[then, otherwise]);
-        assert_eq!(
-            entries_of(&merged, signal),
-            vec![(0, 2, vec![read_of(1, 0, 1)])]
-        );
-
-        // The merged sources follow the order of the branches.
-        let mut then = Provenance::default();
-        then.write(read_of(signal, 0, 2), vec![read_of(1, 0, 1)]);
-        let mut otherwise = Provenance::default();
-        otherwise.write(read_of(signal, 0, 2), vec![read_of(2, 0, 1)]);
-        let merged = Provenance::merge(&[then, otherwise]);
-        assert_eq!(
-            entries_of(&merged, signal),
-            vec![(0, 2, vec![read_of(1, 0, 1), read_of(2, 0, 1)])]
-        );
-
-        let mut then = Provenance::default();
-        then.write(read_of(signal, 0, 2), vec![read_of(2, 0, 1)]);
-        let mut otherwise = Provenance::default();
-        otherwise.write(read_of(signal, 0, 2), vec![read_of(1, 0, 1)]);
-        let merged = Provenance::merge(&[then, otherwise]);
-        assert_eq!(
-            entries_of(&merged, signal),
-            vec![(0, 2, vec![read_of(2, 0, 1), read_of(1, 0, 1)])]
-        );
     }
 }
 

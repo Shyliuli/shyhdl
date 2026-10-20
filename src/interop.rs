@@ -111,8 +111,8 @@ pub use inventory as __inventory;
 fn registered_source() -> Result<String> {
     let mut parts: Vec<&'static RegisteredPart> = inventory::iter::<RegisteredPart>().collect();
     if parts.is_empty() {
-        return Err(Error::NotImplemented {
-            feature: "no design registered: annotate an item with #[hardware_instance]",
+        return Err(Error::Unavailable {
+            message: "no design registered: annotate an item with #[hardware_instance]",
         });
     }
     // Definitions come before behaviour, so an impl is always compiled with the
@@ -176,8 +176,8 @@ fn top_name<T: 'static>() -> Result<String> {
             return Ok(part.name.to_string());
         }
     }
-    Err(Error::NotImplemented {
-        feature: "no #[hardware_instance] registered for this type",
+    Err(Error::Unavailable {
+        message: "no #[hardware_instance] registered for this type",
     })
 }
 
@@ -208,12 +208,12 @@ pub fn verilog<T: 'static>() -> Result<String> {
 /// The Verilog text of one module of the registered design, by module name.
 ///
 /// The design is emitted as one file with every module in it; this returns the
-/// `module` .. `endmodule` block for `module`, so a caller can export exactly the
+/// `module`.. `endmodule` block for `module`, so a caller can export exactly the
 /// instance it is interested in.
 pub fn module_verilog<T: 'static>(module: &str) -> Result<String> {
     let text = verilog::<T>()?;
-    extract_module(&text, module).ok_or(Error::NotImplemented {
-        feature: "no module with that name is part of this design",
+    extract_module(&text, module).ok_or(Error::Unavailable {
+        message: "no module with that name is part of this design",
     })
 }
 
@@ -229,7 +229,7 @@ pub fn test_verilog<T: 'static>(test: &str) -> Result<String> {
     Ok(artifact.verilog)
 }
 
-/// One `module` .. `endmodule` block, or `None` when the name is not there.
+/// One `module`.. `endmodule` block, or `None` when the name is not there.
 fn extract_module(text: &str, module: &str) -> Option<String> {
     let header = format!("module {module}");
     let start = text.find(&header)?;
@@ -307,7 +307,6 @@ pub fn test<T: 'static>(name: &str, out: impl AsRef<Path>) -> Result<Outcome> {
             compiled.verilog.clone(),
         )],
     );
-    options.design_build_id = Some(compiled.metadata.build_id.clone());
     options.metadata_file = Some(metadata_name);
     options.timeout = Duration::from_secs(60);
     options.seed = Some(0);
@@ -327,6 +326,33 @@ pub fn test<T: 'static>(name: &str, out: impl AsRef<Path>) -> Result<Outcome> {
 /// vendored, so nothing else has to be fetched.
 #[cfg(feature = "nvboard")]
 pub fn board<T: 'static>(out: impl AsRef<Path>) -> Result<crate::nvboard::BoardRun> {
+    board_impl::<T>(out.as_ref(), None)
+}
+
+/// Put the design on the board with an explicit port-to-pin table.
+///
+/// `bindings` maps each top-level port to the first pin of its group; a
+/// multi-bit port takes consecutive pins from there, and `SEG0`..`SEG7` name
+/// the eight 7-seg digits. The clock (`clk`/`clock`/`clk_i`/`clock_i`) is still
+/// toggled by the frame loop and must not be listed. Every other port has to be
+/// bound; the array is the whole plan, nothing is inferred from names or order.
+#[cfg(feature = "nvboard")]
+pub fn board_with<T: 'static>(
+    out: impl AsRef<Path>,
+    bindings: &[(&str, &str)],
+) -> Result<crate::nvboard::BoardRun> {
+    let bindings = bindings
+        .iter()
+        .map(|(port, pin)| ((*port).to_string(), (*pin).to_string()))
+        .collect();
+    board_impl::<T>(out.as_ref(), Some(bindings))
+}
+
+#[cfg(feature = "nvboard")]
+fn board_impl<T: 'static>(
+    out: &Path,
+    bindings: Option<Vec<(String, String)>>,
+) -> Result<crate::nvboard::BoardRun> {
     let compiled = compile_design::<T>()?;
     let top = compiled.design.top();
     let ports = top
@@ -341,13 +367,14 @@ pub fn board<T: 'static>(out: impl AsRef<Path>) -> Result<crate::nvboard::BoardR
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let build_dir = out.as_ref().join("board");
+    let build_dir = out.join("board");
     crate::nvboard::run(&crate::nvboard::BoardOptions {
         build_dir,
         top: top.verilog_name.clone(),
         verilog: compiled.verilog,
         ports,
         clock: None,
+        bindings,
         announce: true,
     })
 }
@@ -527,7 +554,6 @@ impl Simulator {
                 self.verilog.clone(),
             )],
         );
-        options.design_build_id = Some(self.metadata.build_id.clone());
         options.metadata_file = Some(metadata_name);
         options.timeout = Duration::from_secs(60);
         options.seed = Some(0);
@@ -567,8 +593,6 @@ pub struct Debugger {
     /// Loopback port the server listens on.
     pub port: u16,
     server: crate::debugger::DebugServer,
-    /// Run manifest this session was paired with.
-    manifest_path: PathBuf,
 }
 
 impl Debugger {
@@ -578,19 +602,14 @@ impl Debugger {
     /// There is no default step: a step is a property of the replay a caller
     /// asks for — one clock period, one time step, whatever the recording is
     /// being read for — and a constant here would silently decide it.
-    pub fn new(result: &RunResult, step_ns: u32) -> Result<Debugger> {
-        Debugger::for_run(result, step_ns)
-    }
-
-    /// Prepare a session for the recording a run wrote.
     ///
     /// The manifest the run wrote is the pairing: it names the metadata file and
     /// the recording root of every DUT instance, which is what the server needs
     /// to bind symbols to signals.
-    pub fn for_run(result: &RunResult, step_ns: u32) -> Result<Debugger> {
+    pub fn new(result: &RunResult, step_ns: u32) -> Result<Debugger> {
         let manifest = crate::simulation::load_manifest(&result.manifest_path)?;
-        let wave = manifest.wave.as_ref().ok_or(Error::NotImplemented {
-            feature: "this run recorded no waveform, so there is nothing to replay",
+        let wave = manifest.wave.as_ref().ok_or(Error::Unavailable {
+            message: "this run recorded no waveform, so there is nothing to replay",
         })?;
         let wave_path = PathBuf::from(&wave.path);
         let recording = if wave_path.is_absolute() {
@@ -618,8 +637,8 @@ impl Debugger {
             .map(|root| {
                 crate::debugger::RootMapping::new(root.source_root.clone(), root.wave_root.clone())
             })
-            .ok_or(Error::NotImplemented {
-                feature: "the run manifest records no DUT root, so there is nothing to bind",
+            .ok_or(Error::Unavailable {
+                message: "the run manifest records no DUT root, so there is nothing to bind",
             })?;
 
         let waveform = crate::waveform::Waveform::load(&recording).map_err(|error| Error::Io {
@@ -652,7 +671,6 @@ impl Debugger {
         Ok(Debugger {
             port: server.port(),
             server,
-            manifest_path: result.manifest_path.clone(),
         })
     }
 
@@ -661,17 +679,7 @@ impl Debugger {
     ///
     /// Reconnecting is how a front end restarts a replay, so the listener stays
     /// up; the recording itself is only read.
-    ///
-    /// `result` names the run to replay, which is what pairs the recording with
-    /// the design it came from.
-    pub fn run(self, result: RunResult) -> Result<()> {
-        // A session replayed against a run it was not built for would show the
-        // wrong recording, so the pairing is checked instead of assumed.
-        if self.manifest_path != result.manifest_path {
-            return Err(Error::NotImplemented {
-                feature: "this Debugger was built for a different run",
-            });
-        }
+    pub fn run(self) -> Result<()> {
         let elf = self.server.elf_path().to_path_buf();
         let server = self.server;
         server.serve_sessions().map_err(|error| Error::Io {

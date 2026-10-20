@@ -1,9 +1,7 @@
 //! Building the shared [`DesignMetadata`] from a lowered design.
 //!
 //! The debugger reads this to turn a recorded RTL signal back into a typed
-//! source value (REQ-DBG-004). The build id covers the sources, the top module
-//! and its specialisation parameters, so a recording made from `Adder<8>` is
-//! refused when the symbols are for `Adder<1>` (REQ-DBG-010).
+//! source value.
 //!
 //! Variables are emitted **per instance**, not per module type: `RegisterPair`
 //! with two `Register` children gets two sets of variables, addressed
@@ -14,41 +12,25 @@
 //! instance can substitute that root.
 //!
 //! Process locals are deliberately *not* debug variables: a temporary inside a
-//! process is not a stable observation point (REQ-DBG-008). They stay reachable
+//! process is not a stable observation point. They stay reachable
 //! through [`crate::frontend::Design`] for tooling that needs the full model.
 
 use crate::error::Error;
 use crate::frontend::mir::{Design, Module, SignalScope};
-use crate::metadata::{
-    compute_design_build_id, DesignMetadata, DesignParameter, SourceUnit, Variable,
-};
+use crate::metadata::{DesignMetadata, Variable};
 
 /// Build the metadata for a lowered design.
 ///
 /// Fails when an instantiated module is missing from the design: that would mean
 /// a part of the hierarchy has no symbols, which must never be reported as a
 /// complete metadata set.
-pub(crate) fn build_metadata(design: &Design, source: &str) -> Result<DesignMetadata, Error> {
-    let units = vec![SourceUnit {
-        path: design.source_name().to_string(),
-        content: source.to_string(),
-    }];
-    let parameters: Vec<DesignParameter> = design
-        .top()
-        .params
-        .iter()
-        .map(|param| DesignParameter {
-            name: param.name.clone(),
-            value: param.value.to_string(),
-        })
-        .collect();
+pub(crate) fn build_metadata(design: &Design) -> Result<DesignMetadata, Error> {
     let top = design.top().verilog_name.clone();
-    let build_id = compute_design_build_id(&units, &top, &parameters);
 
     let mut variables = Vec::new();
     collect_variables(design, design.top(), &top, &mut variables)?;
 
-    Ok(DesignMetadata::new(build_id, top, variables))
+    Ok(DesignMetadata::new(top, variables))
 }
 
 /// Add one module instance's variables, then recurse into its children.

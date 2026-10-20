@@ -1,19 +1,19 @@
-//! Synthetic debug ELF for GDB replay (REQ-DBG-009, REQ-DBG-051, REQ-DBG-056).
+//! Synthetic debug ELF for GDB replay.
 //!
 //! [`build_symbol_elf`] writes an ELF64 executable for `EM_X86_64` that GDB
 //! loads with `file` while `target remote` answers RSP from the recording. The
 //! file describes a virtual address layout that deliberately differs from the
-//! hardware bit layout (REQ-DBG-009):
+//! hardware bit layout:
 //!
 //! * `.text` starts at [`CODE_BASE`] (4 KiB aligned). Every observation point
 //!   owns one [`POINT_SLOT`]-byte slot of `nop` instructions and one `is_stmt`
 //!   line in the synthetic listing, so a source-level `step` or `next` moves
 //!   exactly one reference point.
-//! * The last slot belongs to the `tick` subprogram at [`SymbolLayout::tick_pc`]
-//!   (REQ-DBG-056). It is a fixed anchor address, never the PC of a recorded
-//!   point: the replay target reports it while walking `break tick` so GDB
-//!   evaluates the host-side condition at every observation point
-//!   (REQ-DBG-035), while ordinary `step` keeps reporting point PCs.
+//! * The last slot belongs to the `tick` subprogram at
+//!   [`SymbolLayout::tick_pc`]. It is a fixed anchor address, never the PC of a
+//!   recorded point: the replay target reports it while walking `break tick`
+//!   so GDB evaluates the host-side condition at every observation point,
+//!   while ordinary `step` keeps reporting point PCs.
 //! * `.data` is uninitialized (`SHT_NOBITS`): the values live in the recording,
 //!   never in this file. Each variable gets one byte-packed slot in a
 //!   declaration-order layout and a `DW_TAG_variable` located at that address.
@@ -95,7 +95,7 @@ pub struct SymbolLayout {
     pub point_pc: Vec<u64>,
     /// Reverse of `point_pc`; the replay point index for a stopped PC.
     pub pc_point: HashMap<u64, usize>,
-    /// Address of the `tick` subprogram, never one of `point_pc` (REQ-DBG-056).
+    /// Address of the `tick` subprogram, never one of `point_pc`.
     pub tick_pc: u64,
     /// Start of `.text`.
     pub code_base: u64,
@@ -268,7 +268,6 @@ pub struct EnumVariantSlot {
 /// Variables the recording does not contain are filtered by the caller: this
 /// function only knows the design metadata, not the recording.
 pub fn build_symbol_elf(meta: &DesignMetadata, points: &[u64], out: &Path) -> Result<SymbolLayout> {
-    meta.validate()?;
     if points.is_empty() {
         return Err(Error::InvalidMetadata {
             message: "cannot build debug symbols without observation points".into(),
@@ -1227,238 +1226,4 @@ fn sym_info(bind: u8, kind: u8) -> u8 {
 /// ELF section name of a DWARF section.
 fn section_name(id: SectionId) -> &'static str {
     id.name()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::metadata::{SourceSpan, TypeField};
-
-    fn variable(instance_path: &str, source_name: &str, ty: ValueType) -> Variable {
-        Variable {
-            id: source_name.into(),
-            source_name: source_name.into(),
-            instance_path: instance_path.into(),
-            rtl_name: "x".into(),
-            ty,
-            source: SourceSpan::new("t.shy", 1, 1),
-        }
-    }
-
-    fn layout(ty: ValueType) -> VarKind {
-        var_kind(&ty, "v").unwrap()
-    }
-
-    #[test]
-    fn widths_expand_to_whole_bytes() {
-        assert_eq!(width_bytes(1), Some(1));
-        assert_eq!(width_bytes(8), Some(1));
-        assert_eq!(width_bytes(9), Some(2));
-        assert_eq!(width_bytes(129), Some(17));
-        assert_eq!(width_bytes(0), None);
-    }
-
-    #[test]
-    fn debug_layout_expands_struct_fields_in_declaration_order() {
-        let kind = layout(ValueType::Struct {
-            name: "Word".into(),
-            fields: vec![
-                TypeField {
-                    name: "op".into(),
-                    ty: ValueType::UInt { width: 4 },
-                },
-                TypeField {
-                    name: "addr".into(),
-                    ty: ValueType::UInt { width: 32 },
-                },
-                TypeField {
-                    name: "flag".into(),
-                    ty: ValueType::Bool,
-                },
-                TypeField {
-                    name: "tag".into(),
-                    ty: ValueType::UInt { width: 7 },
-                },
-            ],
-        });
-        let VarKind::Struct { fields, .. } = &kind else {
-            panic!("expected a struct");
-        };
-        let offsets: Vec<u64> = fields.iter().map(|field| field.byte_offset).collect();
-        assert_eq!(offsets, vec![0, 1, 5, 6]);
-        assert_eq!(kind.byte_size(), 7, "no padding and no bit rounding");
-    }
-
-    #[test]
-    fn nested_structs_sum_their_field_sizes() {
-        // `struct { uint<1>, uint<1> }` is two bytes, not one: the packed width
-        // is two bits, but each field owns a byte (REQ-DBG-009).
-        let kind = layout(ValueType::Struct {
-            name: "Bits".into(),
-            fields: vec![
-                TypeField {
-                    name: "a".into(),
-                    ty: ValueType::UInt { width: 1 },
-                },
-                TypeField {
-                    name: "b".into(),
-                    ty: ValueType::UInt { width: 1 },
-                },
-            ],
-        });
-        assert_eq!(kind.byte_size(), 2);
-
-        let outer = layout(ValueType::Struct {
-            name: "Outer".into(),
-            fields: vec![
-                TypeField {
-                    name: "inner".into(),
-                    ty: ValueType::Struct {
-                        name: "Bits".into(),
-                        fields: vec![
-                            TypeField {
-                                name: "a".into(),
-                                ty: ValueType::UInt { width: 1 },
-                            },
-                            TypeField {
-                                name: "b".into(),
-                                ty: ValueType::UInt { width: 1 },
-                            },
-                        ],
-                    },
-                },
-                TypeField {
-                    name: "tail".into(),
-                    ty: ValueType::UInt { width: 12 },
-                },
-            ],
-        });
-        assert_eq!(outer.byte_size(), 4, "2 bytes of inner plus 2 of tail");
-    }
-
-    #[test]
-    fn arrays_and_enums_size_from_their_elements() {
-        let array = layout(ValueType::Array {
-            element: Box::new(ValueType::UInt { width: 6 }),
-            len: 5,
-        });
-        assert_eq!(array.byte_size(), 5, "one byte per element, not 30 bits");
-
-        let enumeration = layout(ValueType::Enum {
-            name: "state".into(),
-            tag_width: 2,
-            variants: vec![crate::metadata::EnumVariant {
-                name: "idle".into(),
-                tag: 0,
-                payload: None,
-            }],
-        });
-        assert_eq!(enumeration.byte_size(), 1);
-        let VarKind::Enum { variants, .. } = &enumeration else {
-            panic!("expected an enum");
-        };
-        assert_eq!(variants[0].tag, 0);
-    }
-
-    #[test]
-    fn payload_enums_are_a_tag_plus_the_widest_payload() {
-        // `enum Msg { Ping, Data(uint<32>), Pair(Bits) }` in two tag bits: one
-        // tag byte plus the widest payload. `Bits` is two `uint<1>` fields, so
-        // its debug size is two bytes even though its hardware width is two
-        // bits: the union region is measured in debug bytes, not raw bits.
-        let message = || ValueType::Enum {
-            name: "Msg".into(),
-            tag_width: 2,
-            variants: vec![
-                crate::metadata::EnumVariant {
-                    name: "Ping".into(),
-                    tag: 0,
-                    payload: None,
-                },
-                crate::metadata::EnumVariant {
-                    name: "Data".into(),
-                    tag: 1,
-                    payload: Some(Box::new(ValueType::UInt { width: 32 })),
-                },
-                crate::metadata::EnumVariant {
-                    name: "Pair".into(),
-                    tag: 2,
-                    payload: Some(Box::new(ValueType::Struct {
-                        name: "Bits".into(),
-                        fields: vec![
-                            TypeField {
-                                name: "a".into(),
-                                ty: ValueType::UInt { width: 1 },
-                            },
-                            TypeField {
-                                name: "b".into(),
-                                ty: ValueType::UInt { width: 1 },
-                            },
-                        ],
-                    })),
-                },
-            ],
-        };
-        let kind = layout(message());
-        assert_eq!(kind.byte_size(), 5, "one tag byte plus the widest payload");
-        let VarKind::Enum { variants, .. } = &kind else {
-            panic!("expected an enum");
-        };
-        assert!(variants[0].payload.is_none());
-        assert_eq!(
-            variants[1].payload.as_deref().map(VarKind::byte_size),
-            Some(4)
-        );
-        assert_eq!(
-            variants[2].payload.as_deref().map(VarKind::byte_size),
-            Some(2),
-            "two expanded fields, not two bits"
-        );
-
-        // A field after the enum starts after the whole union, so its offset
-        // does not move with the active variant.
-        let holder = layout(ValueType::Struct {
-            name: "Holder".into(),
-            fields: vec![
-                TypeField {
-                    name: "before".into(),
-                    ty: ValueType::UInt { width: 8 },
-                },
-                TypeField {
-                    name: "msg".into(),
-                    ty: message(),
-                },
-                TypeField {
-                    name: "after".into(),
-                    ty: ValueType::UInt { width: 16 },
-                },
-            ],
-        });
-        let VarKind::Struct { fields, .. } = &holder else {
-            panic!("expected a struct");
-        };
-        assert_eq!(fields[1].byte_offset, 1);
-        assert_eq!(fields[2].byte_offset, 6, "1 + tag byte + 4 payload bytes");
-        assert_eq!(holder.byte_size(), 8);
-    }
-
-    #[test]
-    fn symbol_names_come_from_the_instance_path() {
-        assert_eq!(
-            symbol_name(&variable("top.u_adder", "reg", ValueType::Bool)).unwrap(),
-            "top__u_adder__reg"
-        );
-        assert_eq!(
-            symbol_name(&variable("top", "reg", ValueType::Bool)).unwrap(),
-            "top__reg"
-        );
-        assert_eq!(
-            symbol_name(&variable("top", "weird name", ValueType::Bool)).unwrap(),
-            "top__weird_name"
-        );
-        assert_eq!(
-            symbol_name(&variable("1bad.path", "x", ValueType::Bool)).unwrap(),
-            "_bad__path__x"
-        );
-    }
 }

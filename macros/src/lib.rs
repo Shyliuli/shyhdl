@@ -21,7 +21,7 @@
 //!     ::shyhdl::RegisteredPart {
 //!         kind: ::shyhdl::PartKind::Instance,
 //!         name: "Adder8",
-//!         source: "#[hardware_instance]\nstruct Adder8 { .. }",
+//!         source: "#[hardware_instance]\nstruct Adder8 {.. }",
 //!         file: file!(),
 //!         line: line!(),
 //!     }
@@ -96,7 +96,7 @@ impl VisitMut for EditorRewrite {
                     syn::parse_quote!(#base.__set_bit(#step, #value))
                 };
             }
-            // `match self.sel { 0 => .., 1 => .. }` compares a hardware value
+            // `match self.sel { 0 =>.., 1 =>.. }` compares a hardware value
             // with integer patterns, which Rust patterns cannot express. When
             // every arm is a literal, a range, an or-pattern or `_`, the match
             // becomes a guard chain over a bound scrutinee: same order, same
@@ -324,7 +324,7 @@ fn is_integer_literal(expr: &syn::Expr) -> bool {
 /// Rewrite a match whose arms are integer patterns into a guard chain.
 ///
 /// Returns `None` when any arm cannot be expressed as a comparison (a binding,
-/// a variant, a slice, ...): the match is then left exactly as written, so the
+/// a variant, a slice,...): the match is then left exactly as written, so the
 /// rewrite never changes what the code means.
 fn rewrite_match(item: &syn::ExprMatch) -> Option<syn::Expr> {
     // A scrutinee with side effects would run twice if it appeared in every
@@ -656,7 +656,6 @@ pub fn hardware_instance(_attr: TokenStream, item: TokenStream) -> TokenStream {
             let registration = register("Instance", &name, &source);
             quote! {
                 #declared
-                #[allow(unexpected_cfgs)]
                 #[cfg(rust_analyzer)]
                 #editor_constructor
                 #registration
@@ -674,7 +673,6 @@ pub fn hardware_instance(_attr: TokenStream, item: TokenStream) -> TokenStream {
             let editor = editor_fn(&item_fn);
             let registration = register("Function", &name, &source);
             quote! {
-                #[allow(unexpected_cfgs)]
                 #[cfg(rust_analyzer)]
                 #editor
                 #registration
@@ -693,7 +691,7 @@ pub fn hardware_instance(_attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// A struct or enum keeps its own definition, because the DSL types such as
 /// `U<8>` are provided by the library and the Rust side stays usable. An impl
-/// block becomes `impl .. ::shyhdl::Hardware for Type .. {}`: the trait has a
+/// block becomes `impl.. ::shyhdl::Hardware for Type.. {}`: the trait has a
 /// default `run`, so an empty impl is the placeholder for a body that is compiled
 /// later from the registered text.
 #[proc_macro_attribute]
@@ -725,10 +723,8 @@ pub fn hardware(attr: TokenStream, item: TokenStream) -> TokenStream {
             };
             let registration = register(kind, &name, &source);
             quote! {
-                #[allow(unexpected_cfgs)]
                 #[cfg(not(rust_analyzer))]
                 #placeholder
-                #[allow(unexpected_cfgs)]
                 #[cfg(rust_analyzer)]
                 #editor
                 #registration
@@ -756,10 +752,8 @@ pub fn hardware(attr: TokenStream, item: TokenStream) -> TokenStream {
             let registration = register("Impl", &name, &source);
             let editor = editor_impl(&item_impl);
             quote! {
-                #[allow(unexpected_cfgs)]
                 #[cfg(not(rust_analyzer))]
                 #placeholder
-                #[allow(unexpected_cfgs)]
                 #[cfg(rust_analyzer)]
                 #editor
                 #registration
@@ -779,7 +773,7 @@ pub fn hardware(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The placeholder is a function with the same name and visibility that returns
 /// the test's `TestId`, so a test can be handed to the simulator
 /// (`sim.run(adds)`). The registered text carries the attribute with its
-/// arguments (`timeunit`, `precision`, ..) and the original body.
+/// arguments (`timeunit`, `precision`,..) and the original body.
 #[proc_macro_attribute]
 pub fn hardware_test(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as Item);
@@ -807,10 +801,8 @@ pub fn hardware_test(attr: TokenStream, item: TokenStream) -> TokenStream {
             let editor = editor_test(&item_fn, &name_literal);
             let registration = register("Test", &name, &source);
             quote! {
-                #[allow(unexpected_cfgs)]
                 #[cfg(not(rust_analyzer))]
                 #placeholder
-                #[allow(unexpected_cfgs)]
                 #[cfg(rust_analyzer)]
                 #editor
                 #registration

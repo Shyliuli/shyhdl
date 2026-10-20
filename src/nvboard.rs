@@ -5,7 +5,9 @@
 //! `nvboard_update()` applies the switch and button states, `eval()` settles
 //! the design, and the next frame draws the LEDs. Switches drive the design's
 //! inputs, LEDs show its outputs, so a combinational design can be exercised by
-//! hand and a clocked one by flipping the clock input.
+//! hand and a clocked one by flipping the clock input. Outputs named
+//! `seg0`..`seg7` (8 bits: A..G plus DP) drive the eight 7-seg digits instead of
+//! an LED.
 //!
 //! NVBoard itself is vendored in `vendor/nvboard` and built into
 //! `libnvboard.a` on first use; nothing outside this crate has to be installed
@@ -13,6 +15,7 @@
 //!
 //! This module only exists when the `nvboard` feature is enabled.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -27,6 +30,34 @@ const SWITCHES: [&str; 16] = [
 const LEDS: [&str; 16] = [
     "LD0", "LD1", "LD2", "LD3", "LD4", "LD5", "LD6", "LD7", "LD8", "LD9", "LD10", "LD11", "LD12",
     "LD13", "LD14", "LD15",
+];
+/// 7-seg pins of one digit, least significant segment first: A..G then DP.
+/// A port bit 0 drives A, bit 6 drives G and bit 7 drives the decimal point.
+const SEG_PINS: [[&str; 8]; 8] = [
+    [
+        "SEG0A", "SEG0B", "SEG0C", "SEG0D", "SEG0E", "SEG0F", "SEG0G", "DEC0P",
+    ],
+    [
+        "SEG1A", "SEG1B", "SEG1C", "SEG1D", "SEG1E", "SEG1F", "SEG1G", "DEC1P",
+    ],
+    [
+        "SEG2A", "SEG2B", "SEG2C", "SEG2D", "SEG2E", "SEG2F", "SEG2G", "DEC2P",
+    ],
+    [
+        "SEG3A", "SEG3B", "SEG3C", "SEG3D", "SEG3E", "SEG3F", "SEG3G", "DEC3P",
+    ],
+    [
+        "SEG4A", "SEG4B", "SEG4C", "SEG4D", "SEG4E", "SEG4F", "SEG4G", "DEC4P",
+    ],
+    [
+        "SEG5A", "SEG5B", "SEG5C", "SEG5D", "SEG5E", "SEG5F", "SEG5G", "DEC5P",
+    ],
+    [
+        "SEG6A", "SEG6B", "SEG6C", "SEG6D", "SEG6E", "SEG6F", "SEG6G", "DEC6P",
+    ],
+    [
+        "SEG7A", "SEG7B", "SEG7C", "SEG7D", "SEG7E", "SEG7F", "SEG7G", "DEC7P",
+    ],
 ];
 
 /// One port of the design top, as it appears in the generated Verilog.
@@ -64,6 +95,9 @@ pub struct BoardOptions {
     pub ports: Vec<BoardPort>,
     /// Input port to toggle as a clock, if the design has one.
     pub clock: Option<String>,
+    /// Explicit `(port, first pin)` bindings. When set, the automatic
+    /// switch/LED allocation is skipped and every port must be listed.
+    pub bindings: Option<Vec<(String, String)>>,
     /// Print the pin assignment and the "close the window" hint before the
     /// window opens.
     pub announce: bool,
@@ -99,6 +133,7 @@ struct Bind {
     width: u32,
     pins: Vec<&'static str>,
     input: bool,
+    segment: bool,
 }
 
 /// Everything resolved from the environment before a build starts.
@@ -152,11 +187,13 @@ fn plan(ports: &[BoardPort], clock: Option<&str>) -> Result<Vec<Bind>> {
             return Err(Error::Board {
                 message: format!(
                     "port `{}` would use {}..{} of the 16 {pool_name}; the design needs more",
-                    port.name, *used, *used + width - 1
+                    port.name,
+                    *used,
+                    *used + width - 1
                 ),
             });
         }
-        // NVBoard takes the pins most-significant first, like the .nxdc file.
+        // NVBoard takes the pins most-significant first, like the.nxdc file.
         let pins = (0..width).rev().map(|bit| pool[*used + bit]).collect();
         *used += width;
         binds.push(Bind {
@@ -164,6 +201,7 @@ fn plan(ports: &[BoardPort], clock: Option<&str>) -> Result<Vec<Bind>> {
             width: port.width,
             pins,
             input: port.input,
+            segment: false,
         });
     }
 
@@ -173,6 +211,142 @@ fn plan(ports: &[BoardPort], clock: Option<&str>) -> Result<Vec<Bind>> {
         });
     }
     Ok(binds)
+}
+
+/// Bind exactly the ports the caller names, in the caller's order.
+///
+/// Each entry maps a top-level port to the first pin of its group. A port of
+/// `width` bits takes `width` consecutive pins, bit 0 at the named pin; `SEG0`
+/// `SEG7` name the eight 8-pin 7-seg digits and are only valid for outputs.
+fn explicit_plan(
+    ports: &[BoardPort],
+    clock: Option<&str>,
+    bindings: &[(String, String)],
+) -> Result<Vec<Bind>> {
+    let mut binds = Vec::new();
+    let mut bound = HashSet::new();
+    let mut used_pins = HashSet::new();
+
+    for (name, pin) in bindings {
+        if !bound.insert(name.clone()) {
+            return Err(Error::Board {
+                message: format!("port `{name}` is bound twice"),
+            });
+        }
+        let Some(port) = ports.iter().find(|port| port.name == *name) else {
+            return Err(Error::Board {
+                message: format!("binding names unknown port `{name}`"),
+            });
+        };
+        if port.width == 0 {
+            return Err(Error::Board {
+                message: format!("port `{name}` has zero width"),
+            });
+        }
+        if port.input && Some(port.name.as_str()) == clock {
+            return Err(Error::Board {
+                message: format!(
+                    "`{name}` is driven by the frame loop; remove it from the bindings"
+                ),
+            });
+        }
+
+        let (pins, segment) = expand_pin(pin, port)?;
+        for pin in &pins {
+            if !used_pins.insert(*pin) {
+                return Err(Error::Board {
+                    message: format!("pin `{pin}` is bound twice"),
+                });
+            }
+        }
+        binds.push(Bind {
+            signal: port.name.clone(),
+            width: port.width,
+            pins,
+            input: port.input,
+            segment,
+        });
+    }
+
+    for port in ports {
+        if port.input && Some(port.name.as_str()) == clock {
+            continue;
+        }
+        if !bound.contains(&port.name) {
+            return Err(Error::Board {
+                message: format!("port `{}` has no binding; add it to the array", port.name),
+            });
+        }
+    }
+    Ok(binds)
+}
+
+/// Expand one binding to its pin names, most significant bit first.
+fn expand_pin(pin: &str, port: &BoardPort) -> Result<(Vec<&'static str>, bool)> {
+    let width = port.width as usize;
+
+    if let Some(digit) = pin.strip_prefix("SEG") {
+        if port.input {
+            return Err(Error::Board {
+                message: format!("`{}` is an input and cannot drive `{pin}`", port.name),
+            });
+        }
+        let Ok(digit) = digit.parse::<usize>() else {
+            return Err(Error::Board {
+                message: format!("`{pin}` is not a 7-seg digit; write `SEG0`..`SEG7`"),
+            });
+        };
+        let Some(pins) = SEG_PINS.get(digit) else {
+            return Err(Error::Board {
+                message: format!("`{pin}` is out of range; the board has SEG0..SEG7"),
+            });
+        };
+        if width != 8 {
+            return Err(Error::Board {
+                message: format!(
+                    "`{}` is {width} bits wide; SEG{digit} needs 8 (A..G + DP)",
+                    port.name
+                ),
+            });
+        }
+        return Ok((pins.iter().rev().copied().collect(), true));
+    }
+
+    let (pool, pool_name) = if pin.starts_with("SW") {
+        if !port.input {
+            return Err(Error::Board {
+                message: format!("`{}` is an output and cannot drive `{pin}`", port.name),
+            });
+        }
+        (&SWITCHES, "SW0..SW15")
+    } else if pin.starts_with("LD") {
+        if port.input {
+            return Err(Error::Board {
+                message: format!("`{}` is an input and cannot drive `{pin}`", port.name),
+            });
+        }
+        (&LEDS, "LD0..LD15")
+    } else {
+        return Err(Error::Board {
+            message: format!("`{pin}` is not a board pin; write SWn, LDn or SEGn"),
+        });
+    };
+
+    let Ok(start) = pin[2..].parse::<usize>() else {
+        return Err(Error::Board {
+            message: format!("`{pin}` is not a board pin; write SWn, LDn or SEGn"),
+        });
+    };
+    if start + width > pool.len() {
+        return Err(Error::Board {
+            message: format!(
+                "`{}` needs {width} pins from `{pin}`, past the end of {pool_name}",
+                port.name
+            ),
+        });
+    }
+    let pins = (0..width).rev().map(|bit| pool[start + bit]).collect();
+    Ok((pins, false))
 }
 
 /// Flags SDL2 development files report, from `sdl2-config` or `pkg-config`.
@@ -257,7 +431,9 @@ fn sdl_helper_cflags() -> Vec<String> {
 }
 
 fn tools() -> Result<Tools> {
-    let verilator = crate::simulation::Simulator::discover()?.verilator_path().to_path_buf();
+    let verilator = crate::simulation::Simulator::discover()?
+        .verilator_path()
+        .to_path_buf();
     let (sdl_cflags, sdl_libs) = sdl_flags()?;
     Ok(Tools {
         cxx: std::env::var("CXX").unwrap_or_else(|_| "c++".to_string()),
@@ -270,9 +446,9 @@ fn tools() -> Result<Tools> {
 
 /// Build (or reuse) `libnvboard.a` from the vendored sources.
 ///
-/// The archive lives in the system temporary directory, keyed by a digest of
-/// the sources and the compiler flags, so every run but the first is instant
-/// and the crate never writes into its own source tree.
+/// The archive is cached in the system temporary directory, so every run but
+/// the first is instant and the crate never writes into its own source tree.
+/// Delete the cache to force a rebuild.
 fn build_nvboard(tools: &Tools) -> Result<PathBuf> {
     let vendor = vendor_dir();
     if !vendor.join("src").is_dir() {
@@ -298,28 +474,7 @@ fn build_nvboard(tools: &Tools) -> Result<PathBuf> {
     // include directories, which sdl2-config does not know about.
     let helper_cflags = sdl_helper_cflags();
 
-    let mut fingerprint = Fnv::new();
-    fingerprint.update(tools.cxx.as_bytes());
-    fingerprint.update(tools.ar.as_bytes());
-    for flag in tools
-        .sdl_cflags
-        .iter()
-        .chain(tools.sdl_libs.iter())
-        .chain(helper_cflags.iter())
-    {
-        fingerprint.update(flag.as_bytes());
-    }
-    for source in &sources {
-        let bytes = std::fs::read(source).map_err(|error| Error::Io {
-            path: source.clone(),
-            source: error,
-        })?;
-        fingerprint.update(source.file_name().unwrap_or_default().as_encoded_bytes());
-        fingerprint.update(&bytes);
-    }
-    let cache = std::env::temp_dir()
-        .join("shyhdl-nvboard")
-        .join(format!("{:016x}", fingerprint.finish()));
+    let cache = std::env::temp_dir().join("shyhdl-nvboard");
     let archive = cache.join("libnvboard.a");
     if archive.is_file() {
         return Ok(archive);
@@ -351,7 +506,10 @@ fn build_nvboard(tools: &Tools) -> Result<PathBuf> {
             .arg(source)
             .arg("-o")
             .arg(&object);
-        run_quiet(&mut command, &format!("compiling NVBoard {}", source.display()))?;
+        run_quiet(
+            &mut command,
+            &format!("compiling NVBoard {}", source.display()),
+        )?;
         compiled.push(object);
     }
 
@@ -430,8 +588,14 @@ pub fn run(options: &BoardOptions) -> Result<BoardRun> {
     }
 
     let top = options.top.clone();
-    let clock = options.clock.clone().or_else(|| guess_clock(&options.ports));
-    let binds = plan(&options.ports, clock.as_deref())?;
+    let clock = options
+        .clock
+        .clone()
+        .or_else(|| guess_clock(&options.ports));
+    let binds = match &options.bindings {
+        Some(bindings) => explicit_plan(&options.ports, clock.as_deref(), bindings)?,
+        None => plan(&options.ports, clock.as_deref())?,
+    };
     if options.announce {
         for bind in &binds {
             eprintln!("{}", describe(bind));
@@ -439,7 +603,7 @@ pub fn run(options: &BoardOptions) -> Result<BoardRun> {
         if let Some(clock) = &clock {
             eprintln!("{clock} -> toggled by the frame loop");
         }
-        eprintln!("building the board model ...");
+        eprintln!("building the board model...");
     }
 
     let tools = tools()?;
@@ -466,11 +630,9 @@ pub fn run(options: &BoardOptions) -> Result<BoardRun> {
         source,
     })?;
     let runner_path = build_dir.join("board_runner.cpp");
-    std::fs::write(&runner_path, runner(&top, clock.as_deref())).map_err(|source| {
-        Error::Io {
-            path: runner_path.clone(),
-            source,
-        }
+    std::fs::write(&runner_path, runner(&top, clock.as_deref())).map_err(|source| Error::Io {
+        path: runner_path.clone(),
+        source,
     })?;
 
     let binary = build_dir.join("board");
@@ -483,7 +645,12 @@ pub fn run(options: &BoardOptions) -> Result<BoardRun> {
         tools.sdl_cflags.join(" ")
     );
     let mut link_libs = tools.sdl_libs.clone();
-    link_libs.extend(sdl_helper_cflags().iter().filter(|flag| flag.starts_with("-L")).cloned());
+    link_libs.extend(
+        sdl_helper_cflags()
+            .iter()
+            .filter(|flag| flag.starts_with("-L"))
+            .cloned(),
+    );
     link_libs.extend(sdl_helper_libs());
     let mut ldflags = format!("{} {}", archive.display(), link_libs.join(" "));
     for rpath in rpath_flags(&link_libs) {
@@ -573,7 +740,13 @@ fn describe(bind: &Bind) -> String {
         bind.signal,
         bind.width - 1,
         pins,
-        if bind.input { "switch" } else { "LED" }
+        if bind.segment {
+            "7-seg"
+        } else if bind.input {
+            "switch"
+        } else {
+            "LED"
+        }
     )
 }
 
@@ -598,26 +771,4 @@ fn run_quiet(command: &mut Command, what: &str) -> Result<()> {
     Err(Error::Board {
         message: format!("{what} failed:\n{tail}"),
     })
-}
-
-/// FNV-1a, used only to key the build cache.
-struct Fnv(u64);
-
-impl Fnv {
-    fn new() -> Self {
-        Self(0xcbf2_9ce4_8422_2325)
-    }
-
-    fn update(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 ^= u64::from(*byte);
-            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        self.0 ^= 0xff;
-        self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-
-    fn finish(&self) -> u64 {
-        self.0
-    }
 }

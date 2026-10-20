@@ -53,16 +53,14 @@ fn main() -> shyhdl::Result<()> {
     let result = sim.run(wraps)?;
     println!("wraps: {:?}", result.outcome);
     if result.outcome != Outcome::Pass {
-        return Err(Error::NotImplemented {
-            feature: "the adder test did not pass",
-        });
+        std::process::exit(1);
     }
 
     let dbg = Debugger::new(&result, 10)?;
     println!("debug start on port :{}", dbg.port);
     if std::env::var_os("SHYHDL_DEBUG").is_some() {
         // Blocks while one GDB session replays this recording.
-        dbg.run(result)?;
+        dbg.run()?;
     }
     Ok(())
 }

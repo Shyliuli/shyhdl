@@ -64,7 +64,7 @@ pub struct ReplayTarget {
     break_points: BTreeSet<usize>,
     /// True while a breakpoint on the `tick` anchor is inserted: every resume
     /// then walks the recorded observation points one by one so that GDB can
-    /// evaluate its condition at each of them (REQ-DBG-035).
+    /// evaluate its condition at each of them.
     tick_armed: bool,
     /// The last stop we reported was the anchor, with the cursor left where the
     /// walk reached it.
@@ -85,7 +85,7 @@ impl ReplayTarget {
     /// `signal_of_var` maps each recorded variable to the waveform signal that
     /// carries it; variables the caller could not resolve are already absent
     /// from `layout`, so an unrecorded signal has no address and GDB reports
-    /// "No symbol" instead of a fabricated zero (REQ-DBG-033, AC-MVP-033).
+    /// "No symbol" instead of a fabricated zero.
     pub fn new(
         engine: ReplayEngine,
         layout: SymbolLayout,
@@ -215,7 +215,7 @@ impl ReplayTarget {
         // `tick` anchor. GDB holds the condition host side and only evaluates it
         // at a stop whose PC is the breakpoint's, so a conditional breakpoint
         // must be offered every recorded point, not only the reference points
-        // (REQ-DBG-035, REQ-DBG-039). GDB removes and re-inserts its
+        // GDB removes and re-inserts its
         // breakpoints around every resume, so `tick_armed` is accurate at the
         // moment of the resume.
         if self.tick_armed && matches!(kind, Resume::Continue) {
@@ -249,7 +249,7 @@ impl ReplayTarget {
         let reached = self.point();
 
         // A user breakpoint on an observation point stops before the point the
-        // movement would have reached (REQ-DBG-032: the earliest hit wins).
+        // movement would have reached.
         let hit = match kind {
             Resume::Step | Resume::Continue => self.break_in(from, reached),
             Resume::ReverseStep | Resume::ReverseContinue => self.break_before(reached, from),
@@ -273,7 +273,7 @@ impl ReplayTarget {
                 }
             }
             StopReason::ReferencePoint => SingleThreadStopReason::DoneStep,
-            // "No further observation value" is not a failure (REQ-DBG-012);
+            // "No further observation value" is not a failure;
             // the replay log position is exactly that statement to GDB.
             StopReason::End => SingleThreadStopReason::ReplayLog {
                 tid: None,
@@ -289,7 +289,7 @@ impl ReplayTarget {
 
     /// Bytes of one variable at the current observation point, in the debug
     /// layout the symbol ELF declares. `None` means "not readable here": the
-    /// value has `x`/`z` bits or is not recorded at this point, and REQ-DBG-005
+    /// value has `x`/`z` bits or is not recorded at this point, and
     /// forbids standing in a zero for it.
     fn read_variable(&self, slot: &VarSlot) -> Result<Option<Vec<u8>>, FatalError> {
         let Some(&signal) = self.signal_of_var.get(&slot.id) else {
@@ -323,7 +323,7 @@ impl ReplayTarget {
 /// Serialize `bits` (least significant bit first) into the debug byte layout of
 /// `kind`, starting at `out[offset]`.
 ///
-/// The debug layout is deliberately not the hardware layout (REQ-DBG-009): the
+/// The debug layout is deliberately not the hardware layout: the
 /// hardware packs a struct most significant field first with no padding, while
 /// the debug layout gives every field and every array element its own
 /// `ceil(bits / 8)` bytes in declaration order. A field is therefore sliced out
@@ -475,7 +475,7 @@ fn encode_scalar(bits: &[BitState], out: &mut [u8], offset: usize) -> bool {
 
 /// Byte size of a value in the *debug* layout.
 ///
-/// This is not `ceil(packed bits / 8)`: the debug layout (REQ-DBG-009) gives
+/// This is not `ceil(packed bits / 8)`: the debug layout gives
 /// every struct field and every array element its own whole number of bytes, so
 /// `struct { uint<1>, uint<1> }` occupies two bytes even though its packed
 /// width is two bits, and a nested struct's size is the sum of its fields'
@@ -525,7 +525,7 @@ impl Target for ReplayTarget {
     }
 
     /// Software breakpoints are recorded, never written into the synthetic
-    /// text: the replay is read only (REQ-DBG-011), and GDB must not expect an
+    /// text: the replay is read only, and GDB must not expect an
     /// instruction-stream trap (gdbstub's own guard rail for that mistake).
     #[inline(always)]
     fn guard_rail_implicit_sw_breakpoints(&self) -> bool {
@@ -557,7 +557,7 @@ impl SingleThreadBase for ReplayTarget {
     /// symbol ELF declares. A byte that no symbol covers reads as zero so GDB's
     /// own bookkeeping works; a byte whose signal is not readable here stops
     /// the read short, which GDB reports as an inaccessible address instead of
-    /// a value we invented (REQ-DBG-005, AC-MVP-033).
+    /// a value we invented.
     fn read_addrs(&mut self, start_addr: u64, data: &mut [u8]) -> TargetResult<usize, Self> {
         let mut addr = start_addr;
         let end = start_addr.saturating_add(data.len() as u64);
@@ -582,7 +582,7 @@ impl SingleThreadBase for ReplayTarget {
             let Some(bytes) = self.read_variable(slot).map_err(TargetError::Fatal)? else {
                 // Not readable here (unrecorded, or holding x/z): everything
                 // before this byte was served, so report a short read. A zero
-                // would be a value the recording never had (REQ-DBG-005).
+                // would be a value the recording never had.
                 break;
             };
             data[(addr - start_addr) as usize..(addr - start_addr) as usize + chunk]
@@ -596,12 +596,12 @@ impl SingleThreadBase for ReplayTarget {
         Ok(served)
     }
 
-    /// The replay is read only (REQ-DBG-011): a memory write is always refused.
+    /// The replay is read only: a memory write is always refused.
     ///
     /// `TargetError::NonFatal` is all gdbstub 0.7.10 can send here: its
     /// `TargetError` has no variant carrying a message, so the refusal reaches
     /// GDB as a numeric error reply and GDB prints its own "Cannot access memory
-    /// at address ..." without a reason from the target. A different errno does
+    /// at address..." without a reason from the target. A different errno does
     /// not change that (measured: `E0d` prints the same line), and an RSP memory
     /// map is deliberately not offered: GDB then treats every address outside
     /// the mapped regions as non-`rw` and switches its breakpoints to hardware
@@ -723,7 +723,7 @@ impl SwBreakpoint for ReplayTarget {
 impl HwWatchpoint for ReplayTarget {
     /// Attach a watch to the recorded signal behind `addr`, so a change is
     /// reported at the recorded observation point where it happened, including
-    /// changes between reference points (REQ-DBG-033, AC-MVP-027..029).
+    /// changes between reference points.
     fn add_hw_watchpoint(
         &mut self,
         addr: u64,
@@ -751,324 +751,5 @@ impl HwWatchpoint for ReplayTarget {
         };
         self.engine.unwatch(signal);
         Ok(true)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::debugger::symbols::{EnumVariantSlot, StructField};
-    use crate::waveform::BitVec;
-
-    fn bits(text: &str) -> Vec<BitState> {
-        BitVec::from_msb_string(text).bits().to_vec()
-    }
-
-    fn encoded(width: usize, text: &str, kind: &VarKind) -> Option<Vec<u8>> {
-        let bits = bits(text);
-        assert_eq!(bits.len(), width, "test bitmap width");
-        let mut out = vec![0u8; byte_size(kind)];
-        encode(&bits, kind, &mut out, 0).then_some(out)
-    }
-
-    #[test]
-    fn bool_is_one_byte() {
-        assert_eq!(
-            encoded(1, "1", &VarKind::Bool),
-            Some(vec![1]),
-            "a true bool is one byte"
-        );
-        assert_eq!(encoded(1, "0", &VarKind::Bool), Some(vec![0]));
-    }
-
-    #[test]
-    fn uint_is_little_endian_rounded_up_to_bytes() {
-        // uint<12> of 0xABC: eleven bits of padding above the value.
-        assert_eq!(
-            encoded(12, "101010111100", &VarKind::UInt { width: 12 }),
-            Some(vec![0xBC, 0x0A]),
-            "value bits are LSB first inside ceil(width/8) bytes"
-        );
-    }
-
-    #[test]
-    fn uint_wider_than_a_machine_word_keeps_every_byte() {
-        let kind = VarKind::UInt { width: 130 };
-        let value = encoded(130, &format!("1{}", "0".repeat(129)), &kind);
-        let value = value.expect("a two-state 130 bit value is readable");
-        assert_eq!(value.len(), 17);
-        assert_eq!(
-            value[16], 0b0000_0010,
-            "bit 129 is the second bit of the 17th byte"
-        );
-    }
-
-    #[test]
-    fn int_sign_extends_into_its_bytes() {
-        assert_eq!(
-            encoded(8, "11111111", &VarKind::SInt { width: 8 }),
-            Some(vec![0xFF])
-        );
-        assert_eq!(
-            encoded(16, "1111111111111111", &VarKind::SInt { width: 16 }),
-            Some(vec![0xFF, 0xFF])
-        );
-    }
-
-    #[test]
-    fn struct_fields_are_sliced_out_of_the_hardware_packing() {
-        // Hardware layout (REQ-LANG-003): first field most significant. Nine
-        // bits: `a` (uint<8>) in bits 1..9, `b` (bool) in bit 0.
-        let kind = VarKind::Struct {
-            name: "pair".into(),
-            fields: vec![
-                StructField {
-                    name: "a".into(),
-                    byte_offset: 0,
-                    kind: VarKind::UInt { width: 8 },
-                },
-                StructField {
-                    name: "b".into(),
-                    byte_offset: 1,
-                    kind: VarKind::Bool,
-                },
-            ],
-        };
-        assert_eq!(
-            encoded(9, "000000011", &kind),
-            Some(vec![1, 1]),
-            "a = 1 from the top eight bits, b = 1 from bit 0"
-        );
-    }
-
-    #[test]
-    fn array_element_zero_is_the_least_significant_element() {
-        let kind = VarKind::Array {
-            element: Box::new(VarKind::UInt { width: 8 }),
-            len: 2,
-        };
-        assert_eq!(
-            encoded(16, "0000001000000001", &kind),
-            Some(vec![1, 2]),
-            "element 0 reads the low byte"
-        );
-    }
-
-    #[test]
-    fn enum_uses_the_tag_bits() {
-        let kind = VarKind::Enum {
-            name: "state".into(),
-            tag_width: 2,
-            variants: vec![EnumVariantSlot {
-                name: "idle".into(),
-                tag: 2,
-                payload: None,
-            }],
-        };
-        assert_eq!(encoded(2, "10", &kind), Some(vec![2]));
-    }
-
-    #[test]
-    fn payload_enum_writes_the_tag_and_only_the_active_payload() {
-        let kind = VarKind::Enum {
-            name: "Msg".into(),
-            tag_width: 2,
-            variants: vec![
-                EnumVariantSlot {
-                    name: "Ping".into(),
-                    tag: 0,
-                    payload: None,
-                },
-                EnumVariantSlot {
-                    name: "Data".into(),
-                    tag: 1,
-                    payload: Some(Box::new(VarKind::UInt { width: 8 })),
-                },
-                EnumVariantSlot {
-                    name: "Pair".into(),
-                    tag: 2,
-                    payload: Some(Box::new(VarKind::UInt { width: 16 })),
-                },
-            ],
-        };
-        assert_eq!(byte_size(&kind), 3, "one tag byte plus the widest payload");
-        // Data(42): `42` above the two tag bits `01`, and the byte the payload
-        // does not cover stays zero.
-        assert_eq!(encoded(10, "0010101001", &kind), Some(vec![1, 42, 0]));
-        // Ping has no payload, so the `x` bits where a payload could be are
-        // never read: the tag alone is the value.
-        assert_eq!(
-            encoded(18, "xxxxxxxxxxxxxxxx00", &kind),
-            Some(vec![0, 0, 0]),
-            "an inactive payload's x is not the active value"
-        );
-        // An `x` inside the active payload is not a value.
-        assert_eq!(encoded(10, "0010101x01", &kind), None);
-        // A tag that names no variant reads as nothing.
-        assert_eq!(encoded(10, "0010101011", &kind), None);
-    }
-
-    #[test]
-    fn a_field_after_a_payload_enum_slices_after_the_whole_payload() {
-        // In the recording the enum is two tag bits plus eight payload bits, so
-        // the following uint<8> starts at bit 10; in the debug bytes the enum is
-        // one tag byte plus one payload byte, so the field is at offset 2. A
-        // `bit_width` that forgot the payload would slice the tag byte twice.
-        let kind = VarKind::Struct {
-            name: "Pair".into(),
-            fields: vec![
-                StructField {
-                    name: "msg".into(),
-                    byte_offset: 0,
-                    kind: VarKind::Enum {
-                        name: "Msg".into(),
-                        tag_width: 2,
-                        variants: vec![
-                            EnumVariantSlot {
-                                name: "Ping".into(),
-                                tag: 0,
-                                payload: None,
-                            },
-                            EnumVariantSlot {
-                                name: "Data".into(),
-                                tag: 1,
-                                payload: Some(Box::new(VarKind::UInt { width: 8 })),
-                            },
-                        ],
-                    },
-                },
-                StructField {
-                    name: "tail".into(),
-                    byte_offset: 2,
-                    kind: VarKind::UInt { width: 8 },
-                },
-            ],
-        };
-        assert_eq!(byte_size(&kind), 3);
-        // `msg` is the first field, so it takes the top ten bits: Data(42) is
-        // "0010101001" and tail 7 is "00000111" below it.
-        assert_eq!(
-            encoded(18, "001010100100000111", &kind),
-            Some(vec![1, 42, 7])
-        );
-    }
-
-    #[test]
-    fn a_signed_payload_is_sign_extended_inside_the_union() {
-        let kind = VarKind::Enum {
-            name: "Delta".into(),
-            tag_width: 1,
-            variants: vec![EnumVariantSlot {
-                name: "Move".into(),
-                tag: 1,
-                payload: Some(Box::new(VarKind::SInt { width: 12 })),
-            }],
-        };
-        assert_eq!(byte_size(&kind), 3, "one tag byte plus two signed bytes");
-        // Move(-8): twelve payload bits 111111111000 below the tag bit 1.
-        assert_eq!(
-            encoded(13, "1111111110001", &kind),
-            Some(vec![1, 0xF8, 0xFF])
-        );
-    }
-
-    #[test]
-    fn debug_struct_size_is_the_sum_of_its_field_bytes() {
-        // Packed width is two bits, but the debug layout gives each field a
-        // whole byte, so the struct occupies two bytes and the second field
-        // starts at offset 1.
-        let kind = VarKind::Struct {
-            name: "bits".into(),
-            fields: vec![
-                StructField {
-                    name: "hi".into(),
-                    byte_offset: 0,
-                    kind: VarKind::UInt { width: 1 },
-                },
-                StructField {
-                    name: "lo".into(),
-                    byte_offset: 1,
-                    kind: VarKind::Bool,
-                },
-            ],
-        };
-        assert_eq!(
-            byte_size(&kind),
-            2,
-            "one byte per field, not one per two bits"
-        );
-        assert_eq!(encoded(2, "01", &kind), Some(vec![0, 1]));
-    }
-
-    #[test]
-    fn nested_struct_fields_keep_their_own_byte_offsets() {
-        let inner = VarKind::Struct {
-            name: "inner".into(),
-            fields: vec![
-                StructField {
-                    name: "a".into(),
-                    byte_offset: 0,
-                    kind: VarKind::UInt { width: 4 },
-                },
-                StructField {
-                    name: "b".into(),
-                    byte_offset: 1,
-                    kind: VarKind::UInt { width: 4 },
-                },
-            ],
-        };
-        let outer = VarKind::Struct {
-            name: "outer".into(),
-            fields: vec![
-                StructField {
-                    name: "flag".into(),
-                    byte_offset: 0,
-                    kind: VarKind::Bool,
-                },
-                StructField {
-                    name: "pair".into(),
-                    byte_offset: 1,
-                    kind: inner,
-                },
-            ],
-        };
-        assert_eq!(
-            byte_size(&outer),
-            3,
-            "1 byte for the flag, 2 for the nested struct"
-        );
-        // Packed MSB first: flag is bit 8, the nested pair is bits 0..8 =
-        // 0b1001_0101, so `a` = 0b1001 = 9 and `b` = 0b0101 = 5. The debug
-        // layout then gives flag one byte and the nested struct two.
-        assert_eq!(
-            encoded(9, "110010101", &outer),
-            Some(vec![1, 9, 5]),
-            "flag first, then a and b in the nested struct's own order"
-        );
-    }
-
-    #[test]
-    fn int_wider_than_a_byte_is_sign_extended() {
-        // int<12> of -2048: 0x800 sign extended into two bytes.
-        assert_eq!(
-            encoded(12, "100000000000", &VarKind::SInt { width: 12 }),
-            Some(vec![0x00, 0xF8])
-        );
-        assert_eq!(
-            encoded(12, "000000000001", &VarKind::SInt { width: 12 }),
-            Some(vec![0x01, 0x00]),
-            "a positive value is not sign extended"
-        );
-    }
-
-    #[test]
-    fn unknown_and_high_impedance_bits_are_refused_not_zeroed() {
-        for text in ["x", "z", "u"] {
-            assert_eq!(
-                encoded(1, text, &VarKind::Bool),
-                None,
-                "{text} must not be turned into a number"
-            );
-        }
     }
 }

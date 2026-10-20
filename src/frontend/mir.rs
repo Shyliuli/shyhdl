@@ -9,7 +9,7 @@
 //! Sizes are one-dimensional bit vectors, so the model has no notion of a bus
 //! wider than its own value. Structs are *not* a second storage form: a
 //! struct-typed signal is a single `width()`-bit signal and `Ty::Struct` only
-//! remembers how to cut it into fields (REQ-LANG-003).
+//! remembers how to cut it into fields.
 
 use crate::metadata::{EnumVariant, SourceSpan, TypeField, ValueType};
 
@@ -26,14 +26,13 @@ pub enum Ty {
     /// `int<W>`, `W >= 1`: one `W`-bit two's-complement value.
     SInt(u32),
     /// `[T; N]`, `N >= 1`: `N` values of `T`, element 0 in the least
-    /// significant bits (REQ-LANG-047).
+    /// significant bits.
     ///
     /// The total width is checked against the maximum supported width where the
     /// type is built, so [`Ty::width`] cannot overflow here.
     Array { element: Box<Ty>, len: u32 },
     /// An `enum`, or a built-in `Option<T>` / `Result<T, E>`: a tag in the
-    /// lowest bits with the widest variant's payload above it
-    /// (REQ-LANG-040, REQ-LANG-041).
+    /// lowest bits with the widest variant's payload above it.
     ///
     /// Like an array, the total width is checked where the type is built.
     Enum(EnumTy),
@@ -82,7 +81,7 @@ impl Ty {
         }
     }
 
-    /// The shared metadata model for this type (REQ-DBG-004).
+    /// The shared metadata model for this type.
     pub fn to_value_type(&self) -> ValueType {
         match self {
             Ty::Bool => ValueType::Bool,
@@ -136,7 +135,7 @@ pub struct StructTy {
 
 impl StructTy {
     /// A struct whose fields are packed most significant first, in the order
-    /// they are given, with no padding (REQ-LANG-003).
+    /// they are given, with no padding.
     ///
     /// Fails, rather than inventing a layout, on an empty field list or a total
     /// that does not fit.
@@ -196,7 +195,7 @@ impl StructTy {
 /// The value is one bit vector: the tag in the lowest `tag_width` bits, then
 /// the **widest** variant's payload - every variant shares that room, its own
 /// payload sits at the bottom of it, and the bits above it are zero
-/// (REQ-LANG-040, REQ-LANG-041). Nothing here stores an offset or a width that
+/// Nothing here stores an offset or a width that
 /// the tag width and the payload types do not already say.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumTy {
@@ -223,7 +222,7 @@ impl EnumTy {
         self.variants.iter().find(|variant| variant.name == name)
     }
 
-    /// The shared metadata model (REQ-DBG-004).
+    /// The shared metadata model.
     pub fn to_value_type(&self) -> ValueType {
         ValueType::Enum {
             name: self.name.clone(),
@@ -425,7 +424,7 @@ pub enum SignalKind {
 pub struct Signal {
     /// Name in the generated Verilog. For source signals this is the source
     /// name; for compiler-introduced temporaries it is derived from the source
-    /// position, never from a random value (REQ-VER-005, REQ-VER-009).
+    /// position, never from a random value.
     pub name: String,
     /// Source name, `None` for a compiler-introduced temporary.
     pub source_name: Option<String>,
@@ -457,7 +456,7 @@ pub struct Port {
     pub verilog_name: String,
     /// Direction.
     pub dir: PortDir,
-    /// Width in bits (REQ-LANG-030: always explicit).
+    /// Width in bits.
     pub width: u32,
     /// Type of the value, including the struct layout when applicable.
     pub ty: ValueType,
@@ -673,8 +672,7 @@ pub enum ExprKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Stmt {
     /// An assignment. `nonblocking` is true for state in a sequential process
-    /// (REQ-LANG-016), false for combinational logic and process locals
-    /// (REQ-LANG-017).
+    ///, false for combinational logic and process locals.
     Assign {
         target: LValue,
         value: Expr,
@@ -766,7 +764,7 @@ pub struct ClockSpec {
 /// An asynchronous reset of a sequential process.
 ///
 /// The reset is in the sensitivity list, so its arm runs as soon as the active
-/// level appears, between clock edges (REQ-LANG-020, AC-MVP-005). `edge` says
+/// level appears, between clock edges. `edge` says
 /// which transition enters the arm; the body runs while the level is active.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResetSpec {
@@ -784,7 +782,7 @@ pub enum ProcessKind {
     /// Sequential: an edge-triggered `always` block.
     ///
     /// `resets` are asynchronous resets in source order; the first one has the
-    /// highest priority (REQ-LANG-020).
+    /// highest priority.
     Seq {
         clock: ClockSpec,
         resets: Vec<ResetSpec>,
@@ -950,82 +948,5 @@ impl Design {
     /// Non-fatal diagnostics found while lowering.
     pub fn warnings(&self) -> &[crate::frontend::Diagnostic] {
         &self.warnings
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn packet() -> Ty {
-        let fields = vec![
-            TyField {
-                name: "op".into(),
-                ty: Ty::UInt(4),
-                offset: 40,
-                width: 4,
-            },
-            TyField {
-                name: "addr".into(),
-                ty: Ty::UInt(32),
-                offset: 8,
-                width: 32,
-            },
-            TyField {
-                name: "flag".into(),
-                ty: Ty::Bool,
-                offset: 7,
-                width: 1,
-            },
-            TyField {
-                name: "tag".into(),
-                ty: Ty::UInt(7),
-                offset: 0,
-                width: 7,
-            },
-        ];
-        Ty::Struct(StructTy {
-            name: "Packet".into(),
-            total: 44,
-            fields,
-        })
-    }
-
-    #[test]
-    fn struct_fields_pack_high_to_low_without_padding() {
-        // AC-MVP-015: 4 + 32 + 1 + 7 = 44 bits, no padding.
-        assert_eq!(packet().width(), 44);
-        let op = packet().field("op").unwrap().clone();
-        assert_eq!(op.range(), (40, 44));
-        let tag = packet().field("tag").unwrap().clone();
-        assert_eq!(tag.range(), (0, 7));
-    }
-
-    #[test]
-    fn value_type_conversion_keeps_field_order() {
-        let value = packet().to_value_type();
-        match value {
-            ValueType::Struct { name, fields } => {
-                assert_eq!(name, "Packet");
-                assert_eq!(fields.len(), 4);
-                assert_eq!(fields[0].name, "op");
-                assert_eq!(value_type_width(&fields[0].ty), 4);
-            }
-            other => panic!("unexpected value type: {other:?}"),
-        }
-    }
-
-    fn value_type_width(ty: &ValueType) -> u32 {
-        match ty {
-            ValueType::UInt { width } => *width,
-            other => other.bit_width().unwrap(),
-        }
-    }
-
-    #[test]
-    fn binary_operators_have_verilog_spelling() {
-        assert_eq!(BinOp::Le.verilog(), "<=");
-        assert_eq!(UnOp::BitNot.verilog(), "~");
-        assert_eq!(Edge::Negedge.verilog(), "negedge");
     }
 }

@@ -42,17 +42,14 @@ pub mod waveform;
 pub use editor::*;
 
 pub use error::{Error, Result};
-#[cfg(feature = "nvboard")]
-pub use interop::board;
 pub use interop::{
     __inventory, build, check, list_tests, module_verilog, run, simulate, source_for, test,
     test_verilog, verilog, Debugger, Hardware, PartKind, RegisteredPart, RunResult, Simulator,
     TestId, I, U,
 };
-pub use metadata::{
-    compute_build_id, compute_design_build_id, DesignMetadata, DesignParameter, EnumVariant,
-    SourceSpan, SourceUnit, TypeField, ValueType, Variable, SCHEMA_VERSION,
-};
+#[cfg(feature = "nvboard")]
+pub use interop::{board, board_with};
+pub use metadata::{DesignMetadata, EnumVariant, SourceSpan, TypeField, ValueType, Variable};
 pub use simulation::Outcome;
 
 // Re-exported so a user writes `use shyhdl::*;` once and gets the attributes too.

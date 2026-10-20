@@ -662,7 +662,7 @@ pub(super) fn merge_all_definite(
 ///
 /// A read of one of those bits uses the process's own previous output, because
 /// the process drives the signal and has not assigned this bit yet on this path
-/// (REQ-LANG-023). A bit that *is* definite is a blocking read of the value the
+/// A bit that *is* definite is a blocking read of the value the
 /// process itself computed, which is not feedback; keeping that distinction per
 /// bit range is what stops a run-time bit select - which reads the whole signal
 /// - from looking like a loop over the bits it already assigned.

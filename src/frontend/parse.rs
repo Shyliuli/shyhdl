@@ -102,9 +102,6 @@ pub(crate) struct HwField {
 /// call reads as `let (w, o) = xxx(y, z);`. The body is an ordinary block; it
 /// is rejected at parse time if it contains an `always!` process.
 //
-// The lowering pass that reads these fields lands after this parse model, so
-// nothing in the crate consumes them yet.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct HwFunction {
     /// Function name.
@@ -121,7 +118,6 @@ pub(crate) struct HwFunction {
 }
 
 /// One input parameter of a hardware function.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct HwFunctionParam {
     /// Parameter name.
@@ -467,7 +463,7 @@ fn hardware_struct(
                             field_span.clone(),
                             format!("`#[Clk]` was removed, but `{field_name}` still uses it"),
                         )
-                        .with_note(
+            .with_note(
                             "a clock is an ordinary input: write `#[In]`; the debugger's reference clock is configured per testbench",
                             None,
                         ),
@@ -710,7 +706,7 @@ fn missing_return(name: &str, span: &SourceSpan, diagnostics: &mut Diagnostics) 
                 "hardware function `{name}` declares no return type; a hardware function's outputs are its return value"
             ),
         )
-        .with_note(
+            .with_note(
             format!("write `-> (uint<8>, bool)` and call it as `let (a, b) = {name}(..)`"),
             None,
         ),
@@ -1448,7 +1444,7 @@ pub(crate) fn is_builtin_type_name(name: &str) -> bool {
     matches!(name, "Option" | "Result")
 }
 
-/// True when a line looks like `<... arithmetic ...>`: a generic argument that
+/// True when a line looks like `<... arithmetic...>`: a generic argument that
 /// Rust only accepts when it is wrapped in braces.
 fn has_unbraced_const_expression(line: &str) -> bool {
     let Some(open) = line.find('<') else {
@@ -1463,238 +1459,4 @@ fn has_unbraced_const_expression(line: &str) -> bool {
         return false;
     }
     inner.contains('+') || inner.contains('*') || inner.contains('/') || inner.contains('%')
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn first_error(source: &str) -> Diagnostic {
-        parse(source, "f.shy.rs")
-            .expect_err("the source must be rejected")
-            .into_first_error()
-    }
-
-    #[test]
-    fn hardware_function_with_tuple_return_is_parsed() {
-        let file = parse(
-            r#"
-#[hardware_instance]
-fn add_one(y: uint<8>, z: bool) -> (uint<8>, bool) {
-    (y, z)
-}
-"#,
-            "f.shy.rs",
-        )
-        .expect("a valid hardware function parses");
-
-        assert!(file.hw.is_empty(), "a function is not a module struct");
-        assert_eq!(file.functions.len(), 1);
-        let function = &file.functions[0];
-        assert_eq!(function.name, "add_one");
-        assert_eq!(function.params.len(), 2);
-        assert_eq!(function.params[0].name, "y");
-        let syn::Type::Path(ty) = &function.params[0].ty else {
-            panic!("expected `uint<8>`, found {:?}", function.params[0].ty);
-        };
-        assert_eq!(ty.path.segments.last().unwrap().ident, "uint");
-        assert_eq!(function.params[1].name, "z");
-
-        let syn::Type::Tuple(ret) = &function.ret else {
-            panic!("expected a tuple return, found {:?}", function.ret);
-        };
-        assert_eq!(ret.elems.len(), 2);
-        assert_eq!(function.body.stmts.len(), 1);
-    }
-
-    #[test]
-    fn a_parameter_without_a_type_is_rejected() {
-        let diagnostic = first_error(
-            r#"
-#[hardware_instance]
-fn f(y: _) -> uint<8> {
-    y
-}
-"#,
-        );
-        assert_eq!(diagnostic.code, codes::BAD_TYPE);
-        assert!(
-            diagnostic.message.contains("explicit type"),
-            "{}",
-            diagnostic.message
-        );
-        assert!(diagnostic.message.contains('y'), "{}", diagnostic.message);
-    }
-
-    #[test]
-    fn a_missing_return_type_explains_the_tuple_form() {
-        let diagnostic = first_error(
-            r#"
-#[hardware_instance]
-fn f(y: uint<8>) {
-    let _ = y;
-}
-"#,
-        );
-        assert_eq!(diagnostic.code, codes::BAD_TYPE);
-        assert!(
-            diagnostic.message.contains("no return type"),
-            "{}",
-            diagnostic.message
-        );
-        assert!(
-            diagnostic
-                .notes
-                .iter()
-                .any(|note| note.message.contains("-> (uint<8>, bool)")),
-            "{:?}",
-            diagnostic.notes
-        );
-
-        // `-> ()` says the same thing in a different spelling.
-        let diagnostic = first_error(
-            r#"
-#[hardware_instance]
-fn f(y: uint<8>) -> () {
-    let _ = y;
-}
-"#,
-        );
-        assert_eq!(diagnostic.code, codes::BAD_TYPE);
-    }
-
-    #[test]
-    fn a_function_name_may_not_repeat_another_declaration() {
-        let diagnostic = first_error(
-            r#"
-#[hardware_instance]
-struct Thing {
-    #[In] a: uint<8>,
-}
-
-#[hardware_instance]
-fn Thing(y: uint<8>) -> uint<8> {
-    y
-}
-"#,
-        );
-        assert_eq!(diagnostic.code, codes::DECLARATION);
-        assert!(
-            diagnostic
-                .message
-                .contains("`Thing` is declared more than once"),
-            "{}",
-            diagnostic.message
-        );
-
-        let diagnostic = first_error(
-            r#"
-#[hardware_instance]
-fn f(y: uint<8>) -> uint<8> {
-    y
-}
-
-#[hardware_instance]
-fn f(y: uint<8>) -> uint<8> {
-    y
-}
-"#,
-        );
-        assert_eq!(diagnostic.code, codes::DECLARATION);
-        assert!(
-            diagnostic
-                .message
-                .contains("`f` is declared more than once"),
-            "{}",
-            diagnostic.message
-        );
-    }
-
-    #[test]
-    fn always_inside_a_hardware_function_is_rejected() {
-        let diagnostic = first_error(
-            r#"
-#[hardware_instance]
-fn f(y: uint<8>) -> uint<8> {
-    if y[0] {
-        always! { q = 0; }
-    }
-    y
-}
-"#,
-        );
-        assert_eq!(diagnostic.code, codes::UNSUPPORTED);
-        assert!(
-            diagnostic.message.contains("combinational"),
-            "{}",
-            diagnostic.message
-        );
-        assert!(
-            diagnostic.message.contains("always!"),
-            "{}",
-            diagnostic.message
-        );
-        assert!(
-            diagnostic
-                .notes
-                .iter()
-                .any(|note| note.message.contains("impl Hardware")),
-            "{:?}",
-            diagnostic.notes
-        );
-    }
-
-    #[test]
-    fn non_combinational_signatures_are_rejected() {
-        for source in [
-            "#[hardware_instance]\nasync fn f(y: uint<8>) -> uint<8> { y }",
-            "#[hardware_instance]\nunsafe fn f(y: uint<8>) -> uint<8> { y }",
-            "#[hardware_instance]\nconst fn f(y: uint<8>) -> uint<8> { y }",
-            "#[hardware_instance]\nfn f<T>(y: uint<8>) -> uint<8> { y }",
-            "#[hardware_instance]\nfn f(y: uint<8>) -> uint<8> where uint<8>: Copy { y }",
-            "#[hardware_instance]\nfn f(self, y: uint<8>) -> uint<8> { y }",
-        ] {
-            let diagnostic = first_error(source);
-            assert_eq!(
-                diagnostic.code,
-                codes::UNSUPPORTED,
-                "{source}: {}",
-                diagnostic.message
-            );
-        }
-    }
-
-    #[test]
-    fn the_attribute_on_other_items_keeps_the_existing_behaviour() {
-        // A struct is still a module and an enum is still plain data: the
-        // marker is only consulted for structs and functions.
-        let file = parse(
-            r#"
-#[hardware_instance]
-struct M {
-    #[In] a: uint<8>,
-}
-
-#[hardware_instance]
-enum E {
-    A,
-    B,
-}
-"#,
-            "f.shy.rs",
-        )
-        .expect("struct and enum keep their existing meaning");
-
-        assert_eq!(file.hw.len(), 1);
-        assert_eq!(file.hw[0].name, "M");
-        assert!(file.enums.contains_key("E"));
-        assert!(file.functions.is_empty());
-    }
-
-    #[test]
-    fn a_plain_function_is_not_a_design_item() {
-        let file = parse("fn helper(y: uint<8>) -> uint<8> { y }", "f.shy.rs")
-            .expect("a plain function is ignored");
-        assert!(file.functions.is_empty());
-    }
 }

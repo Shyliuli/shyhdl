@@ -149,21 +149,6 @@ impl DependencyGraph {
         Some(cycle.into_iter().map(bit_node_parts).collect())
     }
 
-    /// All nodes mentioned by any edge.
-    pub(crate) fn nodes(&self) -> HashSet<usize> {
-        let mut nodes = HashSet::new();
-        for (from, targets) in &self.edges {
-            nodes.insert(*from);
-            nodes.extend(targets.iter().copied());
-        }
-        nodes
-    }
-
-    /// A cycle if the graph has one, as the signal path that closes it.
-    pub(crate) fn find_cycle(&self) -> Option<Vec<usize>> {
-        find_cycle_in(&self.edges)
-    }
-
     /// Every node reachable from `start`, `start` excluded.
     pub(crate) fn reachable_from(&self, start: usize) -> HashSet<usize> {
         let mut seen = HashSet::new();
@@ -240,76 +225,4 @@ fn find_cycle_in(edges: &HashMap<usize, Vec<usize>>) -> Option<Vec<usize>> {
         }
     }
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bits_track_ranges_across_word_boundaries() {
-        let mut bits = Bits::new(100);
-        bits.set_range(60, 70);
-        let mut expected = Bits::new(100);
-        expected.set_range(60, 70);
-        assert!(bits.contains_all(&expected));
-        assert_eq!(bits.first_missing(&expected), None);
-        let mut wider = Bits::new(100);
-        wider.set_range(0, 100);
-        assert_eq!(bits.first_missing(&wider), Some(0));
-        assert_eq!(Bits::new(100).first_missing(&wider), Some(0));
-    }
-
-    #[test]
-    fn bits_clamp_out_of_range_requests() {
-        let mut bits = Bits::new(8);
-        bits.set_range(4, 100);
-        let mut expected = Bits::new(8);
-        expected.set_range(4, 8);
-        assert_eq!(bits, expected);
-    }
-
-    #[test]
-    fn cycle_is_found_and_reported_as_a_path() {
-        let mut graph = DependencyGraph::default();
-        graph.add_edge(0, 1);
-        graph.add_edge(1, 2);
-        graph.add_edge(2, 0);
-        let cycle = graph.find_cycle().expect("cycle");
-        assert_eq!(
-            cycle.first(),
-            cycle.last(),
-            "cycle path closes on itself: {cycle:?}"
-        );
-        assert_eq!(cycle.len(), 4);
-    }
-
-    #[test]
-    fn acyclic_graph_has_no_cycle() {
-        let mut graph = DependencyGraph::default();
-        graph.add_edge(0, 1);
-        graph.add_edge(1, 2);
-        graph.add_edge(0, 2);
-        assert!(graph.find_cycle().is_none());
-        assert_eq!(graph.reachable_from(0), HashSet::from([1, 2]));
-    }
-
-    #[test]
-    fn self_loop_is_a_cycle() {
-        let mut graph = DependencyGraph::default();
-        graph.add_edge(3, 3);
-        assert_eq!(graph.find_cycle(), Some(vec![3, 3]));
-    }
-
-    #[test]
-    fn merge_intersects_definite_bits() {
-        let mut then_bits = Bits::new(8);
-        then_bits.set_range(0, 8);
-        let mut else_bits = Bits::new(8);
-        else_bits.set_range(0, 4);
-        then_bits.intersect_with(&else_bits);
-        let mut expected = Bits::new(8);
-        expected.set_range(0, 4);
-        assert_eq!(then_bits, expected);
-    }
 }

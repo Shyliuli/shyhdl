@@ -27,7 +27,7 @@ struct Adder<const N: usize> {
 impl<const N: usize> Hardware for Adder<N> {
     fn run(&mut self) {
         // Widening is explicit: `zext` to N+1 bits, add, then take the low N
-        // bits and bit N as the carry out (REQ-LANG-031, REQ-LANG-032).
+        // bits and bit N as the carry out.
         let wide: uint<{ N + 1 }> = self.a.zext::<{ N + 1 }>() + self.b.zext::<{ N + 1 }>();
         self.sum = wide[0..N];
         self.carry = wide.get(N);
@@ -35,7 +35,7 @@ impl<const N: usize> Hardware for Adder<N> {
 }
 
 // A register wrapping the adder: the child is driven by assignments only, no
-// `self.adder.run()` anywhere (REQ-LANG-012).
+// `self.adder.run` anywhere.
 #[hardware_instance]
 struct Adder8 {
     #[In] a: uint<8>,
@@ -50,7 +50,7 @@ struct Adder8 {
 
 impl Hardware for Adder8 {
     fn run(&mut self) {
-        // Wiring: connection order does not change the topology (REQ-LANG-013).
+        // Wiring: connection order does not change the topology.
         self.adder.b = self.b;
         self.adder.a = self.a;
 

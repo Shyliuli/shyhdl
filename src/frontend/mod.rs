@@ -23,7 +23,7 @@
 //! A `#[hardware_instance]` struct is one module; its fields are ports
 //! (`#[In]`, `#[Out]`) or child instances (`#[instance]`). A clock is an
 //! ordinary `#[In]`: the language has no clock marking.
-//! The `impl Hardware for ...` body is `fn run(&mut self)`:
+//! The `impl Hardware for...` body is `fn run(&mut self)`:
 //!
 //! ```text
 //! fn run(&mut self) {
@@ -53,7 +53,7 @@
 //! * no role is inferred from a signal name or an edge polarity, and no
 //!   attribute marks a reset: the order of the arms carries that meaning;
 //! * the reset always has priority in the generated `if/else`, in source order,
-//!   the first arm highest (REQ-LANG-020).
+//!   the first arm highest.
 //!
 //! An edge chain is accepted as an equivalent spelling when the intent is clear
 //! from the control flow itself: every branch before the last is an
@@ -61,13 +61,13 @@
 //!
 //! Inside an `always!` arm, module state is assigned non-blocking and a `let`
 //! local is a blocking temporary, so reading a register inside the process sees
-//! the previous value (REQ-LANG-016, REQ-LANG-017).
+//! the previous value.
 //!
 //! ## Widths and bits
 //!
 //! Const width expressions are braced (`uint<{ N + 1 }>`), which is the only
 //! spelling Rust - and therefore `syn` - accepts as a generic argument. The
-//! frontend evaluates them itself while compiling (REQ-MVP-013); it never asks
+//! frontend evaluates them itself while compiling; it never asks
 //! rustc for generic const arithmetic. A bare `N + 1` is a syntax error and is
 //! reported with that hint.
 //!
@@ -79,7 +79,7 @@
 //! every bit of every driven signal must have exactly one driver.
 //!
 //! A struct without `#[hardware_instance]` is a plain data value with a fixed
-//! layout: fields packed most significant first, no padding (REQ-LANG-003).
+//! layout: fields packed most significant first, no padding.
 //!
 //! # What is checked
 //!
@@ -180,7 +180,7 @@ pub fn compile_all_file(source_path: &Path, top: &str) -> Result<CompiledDesign,
     let loaded = load_design(source_path)?;
     let design = lower::lower_parsed(loaded.parsed, &loaded.entry_name, top)?;
     let verilog = verilog::emit(&design);
-    let metadata = meta::build_metadata(&design, &loaded.source_text).map_err(|error| {
+    let metadata = meta::build_metadata(&design).map_err(|error| {
         Diagnostics::from(Diagnostic::error(
             codes::INTERNAL,
             None,
@@ -202,8 +202,6 @@ pub struct LoadedDesign {
     parsed: parse::ParsedFile,
     /// Name of the entry file, as diagnostics report it.
     entry_name: String,
-    /// Contents of every file, in load order. The build id covers all of them.
-    source_text: String,
     /// `(name, source)` of every loaded file, for the layers that scan for
     /// `#[hardware_test]` functions.
     pub files: Vec<(String, String)>,
@@ -244,15 +242,9 @@ pub fn load_design(source_path: &Path) -> Result<LoadedDesign, Diagnostics> {
         .first()
         .map(|(name, _)| name.clone())
         .unwrap_or_else(|| source_path.display().to_string());
-    let source_text = files
-        .iter()
-        .map(|(name, text)| format!("// {name}\n{text}"))
-        .collect::<Vec<_>>()
-        .join("\n");
     Ok(LoadedDesign {
         parsed,
         entry_name,
-        source_text,
         files,
     })
 }
@@ -460,7 +452,7 @@ pub fn compile_all(
 ) -> Result<CompiledDesign, Diagnostics> {
     let design = lower::lower(source, source_name, top)?;
     let verilog = verilog::emit(&design);
-    let metadata = meta::build_metadata(&design, source).map_err(|error| {
+    let metadata = meta::build_metadata(&design).map_err(|error| {
         Diagnostics::from(Diagnostic::error(
             codes::INTERNAL,
             None,

@@ -4,46 +4,44 @@
 //! cursor along it:
 //!
 //! * [`StepMode::Clock`] - reference points are the edges of one named clock
-//!   signal, detected from the recording itself (REQ-DBG-023, REQ-DBG-024).
+//!   signal, detected from the recording itself.
 //! * [`StepMode::Interval`] - reference points are the fixed grid
-//!   `origin + n * period` (REQ-DBG-025).
+//!   `origin + n * period`.
 //!
 //! Two operations move the cursor, and they mean different things:
 //!
 //! * [`ReplayEngine::step`] moves exactly one reference point. Forward, it
 //!   stops earlier if a watched signal changed in between, because stepping
-//!   must not jump over an earlier watch hit (REQ-DBG-034). Backward it moves
-//!   to the previous reference point and to nothing else (REQ-DBG-031).
+//!   must not jump over an earlier watch hit. Backward it moves
+//!   to the previous reference point and to nothing else.
 //! * [`ReplayEngine::continue_run`] ignores reference points and stops at the
 //!   earliest watched change, or at the end of the record. It only considers
 //!   changes strictly ahead of the cursor, so signing up for a watch while
 //!   sitting on a timestamp can never report that timestamp again, and
-//!   repeating it can never stall in place (REQ-DBG-032).
+//!   repeating it can never stall in place.
 //!
 //! `watch` reads the recording, not a periodic sample: a signal that changed
 //! at 13 and again at 14 is seen at both times even when the values sampled at
-//! the surrounding reference points are identical (REQ-DBG-033, AC-MVP-029).
+//! the surrounding reference points are identical.
 //!
 //! # Sampling policy
 //!
 //! * Every value is read at one observation point: the last recorded
 //!   timestamp at or before `Cursor::time`. That mapping is stored in
 //!   `Cursor::index` when the cursor moves, so a caller that has not moved the
-//!   cursor is reading the same sample it read before (REQ-DBG-057).
+//!   cursor is reading the same sample it read before.
 //! * A time with no recorded sample never gets an invented one; `index` is
-//!   `None` when the cursor precedes the recording (REQ-DBG-036).
+//!   `None` when the cursor precedes the recording.
 //! * Several changes inside one timestamp are merged into the value that
 //!   timestamp ends with. The engine reports a timestamp once, with the final
 //!   snapshot of every watched signal that changed in it, and never claims to
-//!   replay the order of changes inside that timestamp (REQ-DBG-037,
-//!   REQ-DBG-038).
+//!   replay the order of changes inside that timestamp.
 //! * The value a signal was first recorded with counts as a watch hit with no
 //!   `previous` value. Moving forward from the initial cursor, which sits at
 //!   the first recorded timestamp, never reports it; moving backwards past it
 //!   does.
 //!
-//! Nothing here re-runs a simulation, and nothing here writes (REQ-DBG-001,
-//! REQ-DBG-011).
+//! Nothing here re-runs a simulation, and nothing here writes.
 //!
 //! # Where the design metadata fits
 //!
@@ -73,8 +71,7 @@ pub enum Edge {
 /// Where the reference points of a replay come from.
 ///
 /// The mode is always explicit. Multiple clocks or a missing clock are the
-/// caller's problem to resolve; this layer never picks a default clock for it
-/// (REQ-DBG-020, REQ-DBG-021, REQ-DBG-026).
+/// caller's problem to resolve; this layer never picks a default clock for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepMode {
     /// Reference points are the edges of one named clock signal.
@@ -108,7 +105,7 @@ pub enum Direction {
 /// `index` is the recorded observation point the cursor reads from: the last
 /// one at or before `time`. It is `None` when `time` precedes the first
 /// recorded observation, in which case there is no sample to read and the
-/// caller must say so instead of inventing one (REQ-DBG-036).
+/// caller must say so instead of inventing one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Cursor {
     /// Time of the cursor, in the waveform's own time units.
@@ -149,7 +146,7 @@ pub enum StopReason {
     /// earlier watched change was in the way.
     ReferencePoint,
     /// There is no further observation value: the cursor is at the end of the
-    /// recording. This is not a failure (REQ-DBG-012).
+    /// recording. This is not a failure.
     End,
     /// There is no earlier observation value: the cursor is at the start of
     /// the recording.
@@ -277,8 +274,7 @@ impl ReplayEngine {
     /// Moves the cursor to `time` without moving it to a reference point.
     ///
     /// The cursor reads the last observation point at or before `time`; no
-    /// sample is created for a time the recording does not contain
-    /// (REQ-DBG-036).
+    /// sample is created for a time the recording does not contain.
     pub fn seek(&mut self, time: u64) -> Cursor {
         self.cursor = self.cursor_at(time);
         self.cursor
@@ -315,7 +311,7 @@ impl ReplayEngine {
     /// Adds signals to the watch set.
     ///
     /// Watching is cumulative and idempotent. A signal that is not recorded is
-    /// an error (REQ-DBG-005).
+    /// an error.
     pub fn watch(&mut self, signals: &[SignalId]) -> WaveResult<()> {
         for id in signals {
             if self.watch.iter().any(|watched| watched.id == *id) {
@@ -433,8 +429,8 @@ impl ReplayEngine {
     /// Forward, a watched change strictly between the cursor and the next
     /// reference point stops the movement first, and a watched change exactly
     /// at the next reference point is reported as a watch hit rather than as a
-    /// plain reference point (REQ-DBG-034). Backward, the cursor goes to the
-    /// previous reference point and nowhere else (REQ-DBG-031).
+    /// plain reference point. Backward, the cursor goes to the
+    /// previous reference point and nowhere else.
     pub fn step(&mut self, direction: Direction) -> StepOutcome {
         match direction {
             Direction::Forward => {
@@ -463,7 +459,7 @@ impl ReplayEngine {
     /// watch while sitting on a timestamp must not report that timestamp
     /// again. Because the search is strictly ahead of the cursor, a repeated
     /// `continue` always advances and can never stop in place
-    /// (REQ-DBG-032, REQ-DBG-039). With nothing left to hit, the cursor goes
+    /// With nothing left to hit, the cursor goes
     /// to the end of the record (`End`) or, backwards, to its start (`Start`).
     pub fn continue_run(&mut self, direction: Direction) -> StepOutcome {
         match direction {
@@ -483,8 +479,7 @@ impl ReplayEngine {
         self.waveform.value_at(id, self.cursor.time)
     }
 
-    /// Values of several signals, all read at the same observation point
-    /// (REQ-DBG-057).
+    /// Values of several signals, all read at the same observation point.
     pub fn snapshot(&self, signals: &[SignalId]) -> WaveResult<Vec<(SignalId, Option<Value>)>> {
         signals
             .iter()
@@ -591,7 +586,7 @@ impl ReplayEngine {
 /// Times at which the selected edge of a 1-bit clock occurs.
 ///
 /// The first recorded value establishes the initial level and is not an edge:
-/// a transition can only be observed between two recorded values (REQ-DBG-024).
+/// a transition can only be observed between two recorded values.
 ///
 /// The edge table is the complete Verilog one, so a four-state recording does
 /// not silently lose edges:

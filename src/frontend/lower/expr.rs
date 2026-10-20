@@ -382,11 +382,11 @@ impl Compiler {
             return Err(Diagnostic::error(
                 codes::WIDTH_UNKNOWN,
                 Some(span),
-                "the width of this integer literal cannot be inferred; annotate the value's type (REQ-LANG-030)",
+                "the width of this integer literal cannot be inferred; annotate the value's type",
             ));
         }
 
-        // An enum is compared by type, not by its packed bits (REQ-LANG-042):
+        // An enum is compared by type, not by its packed bits:
         // the tag, and the payload of the variant the tag selects. Every shape
         // involved has to match exactly, so an enum is never another value with
         // the same bits.
@@ -664,7 +664,7 @@ impl Compiler {
                 return Err(Diagnostic::error(
                     codes::WIDTH_UNKNOWN,
                     Some(span),
-                    "cannot infer the width of this integer literal; annotate the value's type (REQ-LANG-030)",
+                    "cannot infer the width of this integer literal; annotate the value's type",
                 ));
             }
         }
@@ -977,7 +977,7 @@ impl Compiler {
                     return Err(Diagnostic::error(
                         codes::WIDTH_UNKNOWN,
                         Some(item_span),
-                        "cannot infer the width of this integer literal; annotate the value's type (REQ-LANG-030)",
+                        "cannot infer the width of this integer literal; annotate the value's type",
                     ))
                 }
                 None => {}
@@ -1026,7 +1026,7 @@ impl Compiler {
                             receiver.ty.describe()
                         ),
                     )
-                    .with_note(
+            .with_note(
                         format!(
                             "sign-extend with `sext::<{width}>()`, or reinterpret the bits with `as uint<{source_width}>` first"
                         ),
@@ -1843,7 +1843,7 @@ impl Compiler {
                 return Err(Diagnostic::error(
                     codes::WIDTH_UNKNOWN,
                     Some(span),
-                    "cannot infer the width of this integer literal; annotate the value's type (REQ-LANG-030)",
+                    "cannot infer the width of this integer literal; annotate the value's type",
                 ));
             }
             match &element_ty {
@@ -1910,7 +1910,7 @@ impl Compiler {
             return Err(Diagnostic::error(
                 codes::WIDTH_UNKNOWN,
                 Some(span),
-                "cannot infer the width of this integer literal; annotate the value's type (REQ-LANG-030)",
+                "cannot infer the width of this integer literal; annotate the value's type.",
             ));
         }
         if let Some(ty) = &expected_element {
@@ -2194,8 +2194,7 @@ impl Compiler {
     /// One enum value: `None`, `Some(v)`, `Msg::Data(v)` or `Msg::Pair { hi, lo }`.
     ///
     /// The value is the packed layout: the tag in the lowest bits, the payload
-    /// above it, and zero in the payload room the variant does not use
-    /// (REQ-LANG-040, REQ-LANG-041).
+    /// above it, and zero in the payload room the variant does not use.
     fn lower_variant(
         &mut self,
         enum_name: Option<&str>,
@@ -2220,7 +2219,7 @@ impl Compiler {
                                 codes::WIDTH_UNKNOWN,
                                 Some(span),
                                 format!(
-                                    "cannot tell which `{name}` this is; annotate the value's type (REQ-LANG-030)"
+                                    "cannot tell which `{name}` this is; annotate the value's type"
                                 ),
                             ))
                         }
@@ -2231,7 +2230,9 @@ impl Compiler {
                         return Err(Diagnostic::error(
                             codes::BAD_TYPE,
                             Some(span),
-                            format!("`{name}` is not an enum, so it has no variant `{variant_name}`"),
+                            format!(
+                                "`{name}` is not an enum, so it has no variant `{variant_name}`"
+                            ),
                         ));
                     };
                     enum_ty
@@ -2244,7 +2245,7 @@ impl Compiler {
                         codes::WIDTH_UNKNOWN,
                         Some(span),
                         format!(
-                            "cannot tell which enum `{variant_name}` belongs to; annotate the value's type (REQ-LANG-030)"
+                            "cannot tell which enum `{variant_name}` belongs to; annotate the value's type"
                         ),
                     ))
                 }
@@ -2466,7 +2467,7 @@ impl Compiler {
     ///
     /// An enum compares its tag and the payload of the variant that is active:
     /// the bits an inactive payload happens to hold are not part of the value
-    /// (REQ-LANG-042). A struct or an array recurses field by field and element
+    /// A struct or an array recurses field by field and element
     /// by element, and a part with no enum inside compares as bits.
     fn typed_equality(
         &mut self,
@@ -2823,7 +2824,7 @@ impl Compiler {
         // The arms are lowered against the context the call site gives, or else
         // against the first arm that names a type without needing one. A literal
         // is never defaulted to a Rust integer type: the width of a value is
-        // always the program's (REQ-LANG-030).
+        // always the program's.
         let expected = expected
             .cloned()
             .or_else(|| self.match_context_ty(&item.arms));
@@ -2946,7 +2947,7 @@ impl Compiler {
     ///
     /// It carries the source position *and* a stable ordinal: a static `for` can
     /// materialise several different values at the same position, and each one
-    /// needs its own signal (REQ-VER-009).
+    /// needs its own signal.
     /// Name of a compiler temporary.
     ///
     /// A temporary that stands for something the source names is called after it:

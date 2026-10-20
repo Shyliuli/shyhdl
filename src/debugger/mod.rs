@@ -1,17 +1,17 @@
-//! Real GDB integration for record/replay debugging (REQ-DBG-050 .. REQ-DBG-059).
+//! Real GDB integration for record/replay debugging.
 //!
 //! A recording is replayed read-only, and standard GDB commands are given the
-//! semantics the requirements assign them:
+//! semantics they get here:
 //!
 //! | GDB command | recording semantics |
 //! | --- | --- |
-//! | `step`, `next` | one reference point (clock edge or grid point), earlier if a watched signal changed in between (REQ-DBG-030, REQ-DBG-034) |
-//! | `reverse-step` | the previous reference point and nothing else (REQ-DBG-031) |
-//! | `continue` | the earliest hit or the end of the recording (REQ-DBG-032) |
-//! | `watch` | every recorded change of that signal, including changes between reference points (REQ-DBG-033) |
-//! | `print`, `ptype` | typed values of the current observation point (REQ-DBG-057) |
-//! | `break` | an observation-point breakpoint; with a condition GDB evaluates it at every recorded point (REQ-DBG-035, REQ-DBG-056) |
-//! | `set var`, any write | refused with an explicit error (REQ-DBG-011) |
+//! | `step`, `next` | one reference point (clock edge or grid point), earlier if a watched signal changed in between |
+//! | `reverse-step` | the previous reference point and nothing else |
+//! | `continue` | the earliest hit or the end of the recording |
+//! | `watch` | every recorded change of that signal, including changes between reference points |
+//! | `print`, `ptype` | typed values of the current observation point |
+//! | `break` | an observation-point breakpoint; with a condition GDB evaluates it at every recorded point |
+//! | `set var`, any write | refused with an explicit error |
 //!
 //! # How GDB is made to see a timeline
 //!
@@ -19,7 +19,7 @@
 //! observation point, each on its own source line, plus a `DW_TAG_variable` per
 //! recorded signal. GDB is started on that ELF with `target remote`, and
 //! [`target::ReplayTarget`] answers RSP from the [`crate::replay::ReplayEngine`]
-//! cursor. Nothing is simulated again and nothing is written (REQ-DBG-001).
+//! cursor. Nothing is simulated again and nothing is written.
 //!
 //! Two facts about GDB's behaviour are load bearing, and both were measured
 //! against GDB 17.2 rather than assumed:
@@ -93,12 +93,12 @@ pub enum DebugError {
         recorded: u32,
     },
     /// A type the debugger cannot lay out honestly, so the variable is refused
-    /// instead of being given a silently wrong layout (REQ-DBG-005).
+    /// instead of being given a silently wrong layout.
     #[error("variable {variable} cannot be debugged yet: {reason}")]
     UnsupportedType {
         /// Metadata variable id.
         variable: String,
-        /// Why it is refused, naming the milestone that owns it.
+        /// Why it is refused.
         reason: String,
     },
     /// The recording could not be searched for a signal (unreadable, ambiguous

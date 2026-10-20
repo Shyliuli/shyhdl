@@ -2,7 +2,7 @@
 //! in Verilog-2005.
 //!
 //! The language allows disjoint bits of one signal to have different drivers
-//! (REQ-LANG-018 works per bit), but Verilog-2005 does not allow a continuous
+//!, but Verilog-2005 does not allow a continuous
 //! assignment to a `reg`. So a signal with a continuous driver on some bits and
 //! a process driver on others is split:
 //!

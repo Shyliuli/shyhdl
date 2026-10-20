@@ -4,8 +4,8 @@
 直接写进普通 Rust 程序：宏登记设计，库在运行时把它编译成 Verilog、导出 testbench、驱动仿真，
 并把一次运行录成可回放的记录。
 
-> 状态：0.1.0。语言子集已经可用并有端到端测试覆盖；它不是把任意 Rust 编译成硬件的工具，
-> 边界见[已知限制](#已知限制)。
+> 状态：0.1.0。语言子集已经可用；它不是把任意 Rust 编译成硬件的工具，边界见
+> [已知限制](#已知限制)。
 
 本项目是一个小玩具，由LLM生成，不建议直接用于生产。
 ## 特性
@@ -197,7 +197,6 @@ src/                库入口、编译驱动、仿真、回放与调试
   interop.rs        Rust 入口：标记类型、注册、simulate、Debugger、字符串导出
 macros/             proc-macro：hardware_instance、hardware、hardware_test
 examples/           单文件 DSL 示例与三个可运行工作区
-tests/              端到端与契约测试
 docs/               语言与库文档
 ```
 

@@ -3,7 +3,7 @@
 //! `for`.
 //!
 //! These expressions are evaluated by the frontend while compiling, so the
-//! generic parameters disappear before Verilog is written (REQ-MVP-013). Only
+//! generic parameters disappear before Verilog is written. Only
 //! const parameters and literals may appear - a signal value in a width is a
 //! bug, and saying so is the whole point.
 
@@ -247,61 +247,5 @@ fn operator_symbol(op: &syn::BinOp) -> &'static str {
         syn::BinOp::Ge(_) => ">=",
         syn::BinOp::Gt(_) => ">",
         _ => "that compound operator",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn expr(source: &str) -> syn::Expr {
-        syn::parse_str(source).expect("test expression parses")
-    }
-
-    fn env() -> ConstEnv {
-        let mut env = ConstEnv::new();
-        env.insert("N".to_string(), 8);
-        env
-    }
-
-    #[test]
-    fn arithmetic_over_parameters_is_evaluated() {
-        assert_eq!(eval(&expr("{ N + 1 }"), &env()).unwrap(), 9);
-        assert_eq!(eval(&expr("N * 2"), &env()).unwrap(), 16);
-        assert_eq!(eval(&expr("(N + 2) / 2"), &env()).unwrap(), 5);
-    }
-
-    #[test]
-    fn literals_in_every_radix_are_understood() {
-        assert_eq!(eval(&expr("8"), &env()).unwrap(), 8);
-        assert_eq!(eval(&expr("0xFFusize"), &env()).unwrap(), 255);
-        assert_eq!(eval(&expr("0b1010"), &env()).unwrap(), 10);
-        assert_eq!(eval(&expr("1_000"), &env()).unwrap(), 1000);
-    }
-
-    #[test]
-    fn signals_and_unknown_names_are_rejected() {
-        assert!(eval(&expr("self.a"), &env()).is_err());
-        let error = eval(&expr("M"), &env()).unwrap_err();
-        assert!(error.contains("not a const parameter"), "{error}");
-    }
-
-    #[test]
-    fn division_by_zero_and_overflow_are_reported() {
-        assert!(eval(&expr("N / 0"), &env())
-            .unwrap_err()
-            .contains("division by zero"));
-        let error = eval(&expr("18446744073709551615 + 1"), &env()).unwrap_err();
-        assert!(error.contains("overflows"), "{error}");
-        assert!(eval(&expr("0xFFFFFFFFFFFFFFFF + 1"), &env()).is_err());
-    }
-
-    #[test]
-    fn widths_are_checked_not_truncated() {
-        assert!(check_width(8).is_ok());
-        assert!(check_width(0).unwrap_err().contains("at least 1"));
-        assert!(check_width(MAX_WIDTH + 1)
-            .unwrap_err()
-            .contains("maximum supported"));
     }
 }

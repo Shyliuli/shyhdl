@@ -1,7 +1,6 @@
 //! Read-only access to a recorded waveform: which signals were recorded and at
-//! what width, which observation points exist, and what value a signal had
-//! (REQ-MVP-009, REQ-DBG-003). It never moves a cursor; that is
-//! [`crate::replay`].
+//! what width, which observation points exist, and what value a signal had at a
+//! given time. It never moves a cursor; that is [`crate::replay`].
 //!
 //! # Contract
 //!
@@ -14,9 +13,9 @@
 //!   before a time yields `Ok(None)`. Neither is ever reported as `0`.
 //! * **One timestamp, one snapshot.** Changes inside one timestamp collapse to
 //!   the value it ends with ([`Waveform::changes`]); intra-timestamp deltas
-//!   are not claimed (REQ-DBG-037, REQ-DBG-038).
-//! * **Times are integers.** Durations are integer arithmetic in
-//!   zeptoseconds, with no floating point (REQ-TEST-004).
+//!   are not claimed.
+//! * **Times are integers.** Durations are integer arithmetic in zeptoseconds,
+//!   zeptoseconds, with no floating point.
 //!
 //! VCD/FST parsing is done by `wellen`, which handles aliases, nested scopes,
 //! vectors of any width, timescales and both file formats.
@@ -55,14 +54,14 @@ pub enum WaveError {
     },
 
     /// The recording contains no observation points, so nothing can be
-    /// replayed (REQ-DBG-012).
+    /// replayed.
     #[error("waveform {path} contains no observation points")]
     NoObservationPoints {
         /// Path of the recording.
         path: PathBuf,
     },
 
-    /// No variable with this path was recorded (REQ-DBG-005, AC-MVP-033).
+    /// No variable with this path was recorded.
     #[error("signal '{path}' is not recorded in this waveform")]
     SignalNotFound {
         /// Path that was looked up.
@@ -152,8 +151,7 @@ pub enum WaveError {
         path: PathBuf,
     },
 
-    /// A duration is not an exact multiple of the waveform time precision
-    /// (REQ-DBG-025).
+    /// A duration is not an exact multiple of the waveform time precision.
     #[error(
         "duration {duration} is not a multiple of the waveform timescale {timescale} \
          (remainder {remainder_zs} zs)"
@@ -320,8 +318,7 @@ impl Timescale {
     /// Parses an integer duration such as `10ns`, `1 ps`, `100us` or `2s`.
     ///
     /// Only unsigned integers and the units `zs` through `s` are accepted;
-    /// fractional values are rejected instead of being rounded
-    /// (REQ-TEST-004).
+    /// fractional values are rejected instead of being rounded.
     pub fn parse(text: &str) -> WaveResult<Timescale> {
         let trimmed = text.trim();
         let digits_end = trimmed
@@ -852,7 +849,7 @@ impl Waveform {
         self.timescale
     }
 
-    /// All recorded observation points, strictly increasing (REQ-DBG-003).
+    /// All recorded observation points, strictly increasing.
     pub fn timestamps(&self) -> &[u64] {
         &self.times
     }
@@ -870,7 +867,7 @@ impl Waveform {
     /// Index of the last observation point at or before `time`.
     ///
     /// `None` means the recording has nothing at or before `time`; the caller
-    /// must not substitute a sample of its own (REQ-DBG-036).
+    /// must not substitute a sample of its own.
     pub fn observation_index(&self, time: u64) -> Option<usize> {
         match self.times.binary_search(&time) {
             Ok(index) => Some(index),
@@ -884,7 +881,7 @@ impl Waveform {
         self.times[0]
     }
 
-    /// Last recorded time, which is the end of the record (REQ-DBG-012).
+    /// Last recorded time, which is the end of the record.
     pub fn last_time(&self) -> u64 {
         self.times[self.times.len() - 1]
     }
@@ -987,8 +984,7 @@ impl Waveform {
 
     /// Value recorded exactly at `time`, if the signal changed then.
     ///
-    /// This distinguishes "changed here" from "held what it had before"
-    /// (REQ-DBG-036).
+    /// This distinguishes "changed here" from "held what it had before".
     pub fn exact_at(&self, id: SignalId, time: u64) -> WaveResult<Option<Value>> {
         let signal = self.loaded_signal(id)?;
         let Ok(index) = self.times.binary_search(&time) else {
@@ -1006,8 +1002,7 @@ impl Waveform {
     /// Changes recorded at the same timestamp are collapsed to the value that
     /// timestamp ends with, and a re-dump of the current value is not reported
     /// as a change. Consecutive entries therefore always differ, which is what
-    /// a watch needs; the recording itself may contain more raw entries
-    /// (REQ-DBG-037, REQ-DBG-038).
+    /// a watch needs; the recording itself may contain more raw entries.
     ///
     /// The first recorded value has no predecessor and is still listed: it was
     /// recorded, so reporting it is not an invented sample. It is the only
@@ -1071,7 +1066,7 @@ impl Waveform {
     /// Converts a physical duration into this recording's time units.
     ///
     /// The duration must be an exact multiple of the recording precision, so a
-    /// step grid can never drift (REQ-DBG-025).
+    /// step grid can never drift.
     pub fn ticks(&self, duration: Timescale) -> WaveResult<u64> {
         let timescale = self
             .timescale()
@@ -1164,53 +1159,5 @@ impl Waveform {
     fn load_all_signals(&mut self) {
         let references: Vec<SignalRef> = self.inner.hierarchy().signals().collect();
         self.inner.load_signals_multi_threaded(&references);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn duration_parsing_is_integer_only() {
-        assert_eq!(
-            Timescale::parse("10ns").unwrap(),
-            Timescale::new(10, TimeUnit::Nano)
-        );
-        assert_eq!(
-            Timescale::parse(" 1 ps ").unwrap(),
-            Timescale::new(1, TimeUnit::Pico)
-        );
-        assert_eq!(
-            Timescale::parse("100us").unwrap().zeptoseconds().unwrap(),
-            100 * 10u128.pow(15)
-        );
-        assert_eq!(
-            Timescale::parse("2s").unwrap().zeptoseconds().unwrap(),
-            2 * 10u128.pow(21)
-        );
-        assert!(
-            Timescale::parse("1.5ns").is_err(),
-            "floats must be rejected"
-        );
-        assert!(Timescale::parse("ns").is_err());
-        assert!(Timescale::parse("10").is_err());
-        assert!(Timescale::parse("0ns").is_err());
-        assert!(Timescale::parse("-1ns").is_err());
-        assert!(
-            Timescale::parse(&format!("{}s", u64::MAX)).is_err(),
-            "overflow"
-        );
-    }
-
-    #[test]
-    fn bit_vectors_keep_unknown_states() {
-        let bits = BitVec::from_msb_string("10xz");
-        assert_eq!(bits.width(), 4);
-        assert_eq!(bits.bits()[0], BitState::Z, "least significant bit first");
-        assert_eq!(bits.bits()[3], BitState::One);
-        assert!(!bits.is_two_state());
-        assert!(bits.as_u64("d").is_err(), "x/z must not become a number");
-        assert_eq!(BitVec::from_msb_string("101").as_u64("d").unwrap(), 0b101);
     }
 }

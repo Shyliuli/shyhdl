@@ -7,7 +7,7 @@
 //! fields most significant first, so the two rules compose. A build-time index
 //! selects an element, a range selects a sub-array, and a run-time index selects
 //! one element too - an index with no element reads the standard unknown and
-//! writes nothing at all. Nothing here is inferred as a RAM (REQ-LATER-004).
+//! writes nothing at all. Nothing here is inferred as a RAM.
 
 /// A struct holding an array: `items` sits above `flag`, with item 0 in the low
 /// half of `items`.

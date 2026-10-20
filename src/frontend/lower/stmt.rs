@@ -108,7 +108,7 @@ impl Compiler {
 
         // A read of a bit this process drives, before the process assigns it, is
         // the process reading its own output: a feedback loop, not a value from
-        // anywhere else (REQ-LANG-023). Only bits this process drives matter; a
+        // anywhere else. Only bits this process drives matter; a
         // bit owned by another process is a legal external read.
         let mut feedback_failed = false;
         for (signal, lo, hi, source) in &context.feedback_reads {
@@ -139,7 +139,7 @@ impl Compiler {
         }
 
         // Every driven bit must be assigned on every path, otherwise the always
-        // block would have to remember its old value (REQ-LANG-015).
+        // block would have to remember its old value.
         let mut failed = false;
         for (signal, everywhere) in &context.anywhere {
             if !matches!(self.cur.signal(*signal).scope, SignalScope::Module) {
@@ -372,7 +372,7 @@ impl Compiler {
     }
 
     /// Wrap the clock body in one `if` per asynchronous reset, in written
-    /// order: the first reset has the highest priority (REQ-LANG-020).
+    /// order: the first reset has the highest priority.
     pub(super) fn nest_resets(
         &mut self,
         resets: &[ResetSpec],
@@ -561,7 +561,7 @@ impl Compiler {
         self.proc = Some(ProcCtx::new(false, index));
 
         // Asynchronous reset bodies first: they keep priority in the generated
-        // `if (reset) ... else ...` chain, in written order (REQ-LANG-020).
+        // `if (reset)... else...` chain, in written order.
         let mut reset_bodies = Vec::new();
         let mut result = Ok(());
         for index in &resets {
@@ -1206,7 +1206,7 @@ impl Compiler {
         }
 
         // The initialiser already holds its value in a temporary it created:
-        // `let x = match ...;` needs no second signal. The temporary becomes the
+        // `let x = match...;` needs no second signal. The temporary becomes the
         // module signal `x` and keeps the assignments it already has.
         if let Some(value) = &value {
             if let ExprKind::Signal(id) = value.kind {
@@ -1245,7 +1245,7 @@ impl Compiler {
         Ok(())
     }
 
-    /// `let x = match ...;` at the top level of `run`: the initialiser's
+    /// `let x = match...;` at the top level of `run`: the initialiser's
     /// temporary becomes the module signal `x`, exactly as a process-local `let`
     /// takes its temporary over.
     ///
@@ -1552,11 +1552,12 @@ impl Compiler {
         // whole signal.
         let write_width = self.cur.signal(write.signal).width();
         for source in &expansion.sources {
-            self.proc
-                .as_mut()
-                .expect("process context")
-                .edges
-                .push((*source, write.signal, 0, write_width));
+            self.proc.as_mut().expect("process context").edges.push((
+                *source,
+                write.signal,
+                0,
+                write_width,
+            ));
         }
         // Provenance is tracked per assignment in the default combinational process
         // only: a sequential process reads the old value of everything it writes,
@@ -1688,7 +1689,7 @@ impl Compiler {
     /// Dependencies are tracked per bit range: a read of bits that were already
     /// assigned in this process resolves to *their* sources (a blocking
     /// temporary), while a read of bits that were not resolves to the signal
-    /// itself, which is what makes a genuine loop visible (REQ-LANG-023).
+    /// itself, which is what makes a genuine loop visible.
     pub(super) fn record_process_assign(&mut self, target: &LValue, value: &Expr) {
         let signal = target.signal();
         let range = target.range();
@@ -1851,7 +1852,6 @@ impl Compiler {
 
         // A bit counts as assigned after the `if` only when both paths assigned
         // it, otherwise the process would have to remember its old value
-        // (REQ-LANG-015).
         let merged = merge_definite(&then_state, &else_state, |signal| {
             self.cur.signal(signal).width()
         });
@@ -1880,7 +1880,7 @@ impl Compiler {
     ///
     /// Every `match` becomes a source-ordered `if`/`else if` chain, whether or
     /// not it has guards: arm order is the priority, so the first arm whose
-    /// pattern matches *and* whose guard holds runs (REQ-LANG-044). A `case`
+    /// pattern matches *and* whose guard holds runs. A `case`
     /// statement cannot express that, because its arms do not fall through.
     ///
     /// Patterns are normalized once (the shared `pattern` module) and each
@@ -2397,7 +2397,7 @@ impl Compiler {
             branch_states.push(arm_state);
             branch_provenances.push(arm_provenance);
 
-            // Coverage only sees unguarded patterns (REQ-LANG-044).
+            // Coverage only sees unguarded patterns.
             if arm.guard.is_none() {
                 if let Err(error) = coverage.add(&lowered.alternatives) {
                     return self.err(
@@ -2452,7 +2452,7 @@ impl Compiler {
         // Every value has to reach an arm; a `_` arm (or an irrefutable binding)
         // is not required when the patterns already cover the type. Otherwise the
         // remaining values fall through and the process would have to remember
-        // its old value (REQ-LANG-022).
+        // its old value.
         if default_block.is_none() {
             let exhaustive = match coverage.is_exhaustive() {
                 Ok(exhaustive) => exhaustive,
@@ -2669,14 +2669,14 @@ impl Compiler {
             }
             None => value_expr.ty.clone(),
         };
-        // A hardware width is always explicit (REQ-LANG-030): an all-literal
+        // A hardware width is always explicit: an all-literal
         // `match` with no context has no width to infer from.
         if ty.width() == 0 {
             return self.err(
                 codes::WIDTH_UNKNOWN,
                 self.span(tail.span()),
                 "the type of this `match` cannot be inferred; annotate the value, for example \
-                 `let x: uint<8> = match ...`, or write a suffix such as `1u8`",
+                 `let x: uint<8> = match...`, or write a suffix such as `1u8`",
             );
         }
 
@@ -3079,7 +3079,7 @@ impl Compiler {
     /// Turn a temporary the initialiser created into the `let` local it is bound
     /// to.
     ///
-    /// `let x = match ...;` lowers the initialiser to a value, and a `match` (or
+    /// `let x = match...;` lowers the initialiser to a value, and a `match` (or
     /// an `if`) produces one temporary holding the selected arm. Copying that
     /// temporary into a second signal only renames it, so the binding takes it
     /// over instead: the statements, the bits and the reads stay as they are.

@@ -4,8 +4,7 @@
 //
 // Timing is entirely Verilator's: the loop jumps from one scheduled time slot to
 // the next with VerilatedContext::time(contextp->nextTimeSlot()), evaluates the
-// model, and dumps the waveform. Nothing on the Rust side models time
-// (REQ-SIM-002, REQ-SIM-003).
+// model, and dumps the waveform. Nothing on the Rust side models time.
 //
 //   argv[1]  VCD path, or "" to run without a waveform
 //   argv[2]  maximum number of event steps (0 = unlimited)

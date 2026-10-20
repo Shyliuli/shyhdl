@@ -135,12 +135,12 @@ let dbg = Debugger::new(&result, 10)?;
 println!("elf={}", dbg.elf_path().display());
 println!("port={}", dbg.port);
 println!("gdb={}", dbg.gdb_argv().join(" "));
-dbg.run(result)?;          // 阻塞，等一个 GDB 会话
+dbg.run()?;                // 阻塞，等一个 GDB 会话
 ```
 
 - `elf_path()`：本次会话的合成调试 ELF（每个信号一个变量，每个观察点一行）。
 - `gdb_argv()`：可直接执行的 GDB 命令行，已包含只读开关与 `target remote`。
-- `run(result)`：只服务一个 GDB 会话，会话结束后返回。
+- `run()`：只服务一个 GDB 会话，会话结束后返回。
 
 符号名规则：`<instance_path>__<source_name>`（如 `Encoder38__sig`），源名在设计里唯一时还会
 有短名别名（`sig`）。

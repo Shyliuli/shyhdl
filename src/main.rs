@@ -3,9 +3,7 @@
 //! Two rules shape this file:
 //!
 //! * Every command either does its work or fails with a diagnostic and a
-//!   non-zero exit code. Nothing is printed that was not produced, and a
-//!   command whose backing milestone is not implemented reports exactly that
-//!   (REQ-VER-007).
+//!   non-zero exit code. Nothing is printed that was not produced.
 //! * Argument errors are caught by `clap` before any work starts, so mutually
 //!   exclusive step modes and malformed parameters never reach the pipeline.
 
@@ -28,20 +26,13 @@ use shyhdl::waveform::{Timescale, WaveError, Waveform};
 
 /// Process exit codes. Stable enough to script against, and printed by
 /// `--help` so they are not folklore.
-///
-/// Commands in this build can only reach a subset of them: the rest are used as
-/// each milestone is wired in, which is why the whole table lives here.
-#[allow(dead_code)]
 mod exit {
     /// The command finished; a test run passed.
     pub const OK: u8 = 0;
     /// A test failed, or a general failure with no more specific code: an
-    /// assertion failed, the run ended without a PASS marker (REQ-TEST-008),
+    /// assertion failed, the run ended without a PASS marker,
     /// or a file could not be read.
     pub const FAILED: u8 = 1;
-    /// Usage error: bad arguments, unknown command, mutually exclusive
-    /// options. `clap` exits with this code on its own.
-    pub const USAGE: u8 = 2;
     /// The source did not compile; diagnostics carry the source location.
     pub const COMPILE_ERROR: u8 = 3;
     /// The generated Verilog failed to build, or the simulator reported an
@@ -49,12 +40,12 @@ mod exit {
     pub const SIMULATION_ERROR: u8 = 4;
     /// The simulation exceeded its timeout.
     pub const TIMEOUT: u8 = 5;
-    /// A required external tool is missing or unusable (REQ-TEST-009).
+    /// A required external tool is missing or unusable.
     pub const ENVIRONMENT: u8 = 6;
     /// The requested capability is not implemented in this build.
     pub const NOT_IMPLEMENTED: u8 = 7;
-    /// Refused: build id or metadata schema mismatch, or a write on a
-    /// read-only replay (REQ-DBG-010, REQ-DBG-011).
+    /// Refused: the recording and the symbols do not belong together, or a
+    /// read-only replay.
     pub const REFUSED: u8 = 8;
 }
 
@@ -68,10 +59,10 @@ Exit codes:
   5  the simulation exceeded its timeout
   6  a required external tool is missing or unusable
   7  the requested capability is not implemented in this build
-  8  refused: build id or metadata schema mismatch, or a write on a read-only replay";
+  8  refused: the recording and the symbols do not belong together, or a write was attempted on a read-only replay";
 
 /// Default artifact directory. Generated Verilog, metadata and waveforms are
-/// build results, never sources (REQ-VER-008).
+/// build results, never sources.
 const DEFAULT_OUT_DIR: &str = "build";
 
 /// Default simulation timeout in seconds.
@@ -122,7 +113,7 @@ struct CompileArgs {
     /// A specialization is part of the name, so a parameterized top is built
     /// with `--top 'Adder<8>'`; there is no separate `--param` option, because
     /// the design's parameters come from the source and the frontend folds them
-    /// into the Verilog name and the build id.
+    /// into the Verilog name.
     #[arg(long, value_name = "NAME", value_parser = parse_name)]
     top: String,
 }
@@ -156,13 +147,12 @@ struct TestArgs {
     #[arg(long, value_name = "DIR", default_value = DEFAULT_OUT_DIR)]
     out: PathBuf,
 
-    /// Random seed reported in the run manifest, so a run can be reproduced
-    /// (REQ-SIM-009).
+    /// Random seed reported in the run manifest, so a run can be reproduced.
     #[arg(long, value_name = "SEED", default_value_t = 0)]
     seed: u64,
 
     /// Simulation timeout in seconds; exceeding it is reported as a timeout,
-    /// not as a failure (REQ-TEST-024).
+    /// not as a failure.
     #[arg(
         long,
         value_name = "SECONDS",
@@ -171,7 +161,7 @@ struct TestArgs {
     )]
     timeout: u64,
 
-    /// Waveform to record, or `none` to record nothing (REQ-SIM-004).
+    /// Waveform to record, or `none` to record nothing.
     #[arg(long, value_name = "FORMAT", value_enum, default_value_t = WaveArg::Vcd)]
     wave: WaveArg,
 }
@@ -202,12 +192,12 @@ struct ListTestsArgs {
 /// Step-mode options of `debug`.
 ///
 /// Explicit configuration wins: `--clock` names the clock, `--grid-interval`
-/// selects the fixed grid, and the two are mutually exclusive (REQ-DBG-020,
-/// REQ-DBG-022). With neither given, the run manifest decides: the testcase that
+/// selects the fixed grid, and the two are mutually exclusive (,
+///). With neither given, the run manifest decides: the testcase that
 /// produced the recording declares its clocks, and the one candidate belonging
 /// to the selected DUT instance is used. No candidate, several candidates, or a
 /// candidate of another instance are reported rather than guessed
-/// (REQ-DBG-021). The design itself carries no clock marking, so nothing is
+/// The design itself carries no clock marking, so nothing is
 /// inferred from the source.
 #[derive(Debug, Args)]
 struct DebugArgs {
@@ -227,26 +217,15 @@ struct DebugArgs {
     )]
     manifest: Option<PathBuf>,
 
-    /// Design metadata (`*.meta.json`) for an external fixture whose recording
-    /// was not produced by `shyhdl test` (REQ-DBG-010).
-    ///
-    /// A recording carries no build identity of its own, so this mode also
-    /// needs `--assume-build-id`: without it there is nothing to check the
-    /// metadata against, and the pairing would be an assumption rather than a
-    /// verification.
+    /// Design metadata (`*.meta.json`) for a recording that was not produced
+    /// by `shyhdl test`.
     #[arg(
         long,
         value_name = "FILE",
         conflicts_with = "manifest",
-        requires = "assume_build_id",
         required_unless_present = "manifest"
     )]
     metadata: Option<PathBuf>,
-
-    /// Build id this external recording is asserted to come from. Checked
-    /// against the metadata's `build_id`; a different id is refused.
-    #[arg(long, value_name = "ID", requires = "metadata")]
-    assume_build_id: Option<String>,
 
     /// Recording path of the design root in an external recording, for example
     /// `TOP.tb_adder.dut`. Defaults to the metadata's own root (no testbench
@@ -265,7 +244,7 @@ struct DebugArgs {
     instance: Option<String>,
 
     /// Step on the edges of this clock signal, named by its path in the
-    /// recording (REQ-DBG-023). Without it, the single clock the testcase
+    /// recording. Without it, the single clock the testcase
     /// recorded for the selected DUT instance is used; no candidate needs an
     /// explicit `--clock` or `--grid-interval`.
     #[arg(long, value_name = "SIGNAL", conflicts_with = "grid_interval")]
@@ -275,7 +254,7 @@ struct DebugArgs {
     // as a clock selection nor needs one: it refines whichever clock mode is in
     // effect, including a clock the manifest recorded.
     /// Which clock edge is a reference point; defaults to `posedge`
-    /// (REQ-DBG-023). Only valid in clock mode, so it conflicts with the fixed
+    /// Only valid in clock mode, so it conflicts with the fixed
     /// grid.
     #[arg(
         long,
@@ -285,8 +264,7 @@ struct DebugArgs {
     )]
     edge: Option<EdgeArg>,
 
-    /// Step on the fixed grid `origin + n * interval`, for example `--grid-interval 10ns`
-    /// (REQ-DBG-025).
+    /// Step on the fixed grid `origin + n * interval`, for example `--grid-interval 10ns`.
     #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
     grid_interval: Option<Timescale>,
 
@@ -348,10 +326,8 @@ fn run(cli: &Cli) -> Result<u8> {
 /// Exit code of a failure. An unclassified failure is `1`, never success.
 fn exit_code_for(error: &Error) -> u8 {
     match error {
-        Error::NotImplemented { .. } => exit::NOT_IMPLEMENTED,
-        Error::BuildIdMismatch { .. }
-        | Error::SchemaVersion { .. }
-        | Error::InvalidMetadata { .. } => exit::REFUSED,
+        Error::Unavailable { .. } => exit::FAILED,
+        Error::InvalidMetadata { .. } => exit::REFUSED,
         Error::Parse { .. }
         | Error::Unsupported { .. }
         | Error::TypeLayout { .. }
@@ -366,9 +342,7 @@ fn exit_code_for(error: &Error) -> u8 {
 // Commands
 //
 // Each command reads its source file first, so an unreadable path is an I/O
-// failure with that path rather than a milestone gap. The pipeline behind the
-// read is wired in as its module lands; until then the command fails with the
-// milestone that owns it instead of pretending to have compiled anything.
+// failure with that path.
 // ---------------------------------------------------------------------------
 
 fn run_build(args: &BuildArgs) -> Result<u8> {
@@ -435,10 +409,7 @@ fn run_test(args: &TestArgs) -> Result<u8> {
         Ok(simulator) => simulator,
         Err(error) => {
             eprintln!("shyhdl: {error}");
-            return Ok(match error {
-                Error::NotImplemented { .. } => exit::NOT_IMPLEMENTED,
-                _ => exit::ENVIRONMENT,
-            });
+            return Ok(exit::ENVIRONMENT);
         }
     };
 
@@ -465,7 +436,6 @@ fn run_test(args: &TestArgs) -> Result<u8> {
             compiled.verilog.clone(),
         )],
     );
-    options.design_build_id = Some(compiled.metadata.build_id.clone());
     options.metadata_file = Some(metadata_name);
     options.timeout = Duration::from_secs(args.timeout);
     options.seed = Some(args.seed);
@@ -526,6 +496,7 @@ fn run_board(args: &BoardArgs) -> Result<u8> {
         verilog: compiled.verilog.clone(),
         ports,
         clock: args.clock.clone(),
+        bindings: None,
         announce: true,
     })?;
     for binding in &run.bindings {
@@ -545,7 +516,7 @@ fn run_board(_args: &BoardArgs) -> Result<u8> {
 }
 
 /// Exit code of a finished simulation run. A run that did not pass never exits
-/// zero, whatever the simulator's own exit status was (REQ-TEST-008).
+/// zero, whatever the simulator's own exit status was.
 fn outcome_exit_code(outcome: Outcome) -> u8 {
     match outcome {
         Outcome::Pass => exit::OK,
@@ -675,7 +646,7 @@ struct DebugPairing {
     metadata: DesignMetadata,
     root: RootMapping,
     /// `roots[].var` of the selected DUT instance; the key clock candidates are
-    /// matched by. Empty in external-fixture mode, which has no testcase record.
+    /// matched by. Empty for an external recording, which has no testcase record.
     root_var: String,
     /// Clocks the testcase declared, from the run manifest.
     clocks: Vec<simulation::ClockRef>,
@@ -690,47 +661,29 @@ fn debug_pairing(args: &DebugArgs) -> std::result::Result<DebugPairing, DebugFai
     }
 }
 
-/// Verified pairing: the run manifest recorded by `shyhdl test`.
+/// Pairing from a run manifest written by `shyhdl test`.
 fn pairing_from_manifest(
     args: &DebugArgs,
     manifest_path: &Path,
 ) -> std::result::Result<DebugPairing, DebugFailure> {
-    // A manifest that is malformed or describes an unusable run is a refused
-    // pairing, not a source-level compile error, so its validation failure is
-    // re-classified instead of surfacing as exit code 3.
-    let manifest = simulation::load_manifest(manifest_path).map_err(classify_manifest_error)?;
+    let manifest = simulation::load_manifest(manifest_path).map_err(DebugFailure::from)?;
     let dir = manifest_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
 
     // The metadata file is the only source of source-level variables.
-    let metadata_name =
-        manifest
-            .paths
-            .metadata
-            .as_deref()
-            .ok_or_else(|| invalid_metadata(format!(
-                "{} records no design metadata, so no source variable can be read; re-run `shyhdl test` with this build",
-                manifest_path.display()
-            )))?;
+    let metadata_name = manifest
+        .paths
+        .metadata
+        .as_deref()
+        .ok_or_else(|| invalid_metadata(format!(
+            "{} records no design metadata, so no source variable can be read; re-run `shyhdl test` with this build",
+            manifest_path.display()
+        )))?;
     let metadata_path = dir.join(metadata_name);
     let metadata = read_metadata(&metadata_path)?;
 
-    // Build id: recorded by the run, repeated by the metadata. Both come from
-    // the frontend, and a disagreement means the symbols are of another build.
-    let recorded_build_id = manifest.design.build_id.clone().ok_or_else(|| {
-        invalid_metadata(format!(
-            "{} records no design build id, so the recording cannot be paired with symbols",
-            manifest_path.display()
-        ))
-    })?;
-    if recorded_build_id != metadata.build_id {
-        return Err(DebugFailure::from(Error::BuildIdMismatch {
-            expected: metadata.build_id.clone(),
-            found: recorded_build_id,
-        }));
-    }
     if manifest.design.top != metadata.top {
         return Err(DebugFailure::from(invalid_metadata(format!(
             "{} names top `{}` but {} names `{}`",
@@ -744,47 +697,17 @@ fn pairing_from_manifest(
     let selected = select_root(&manifest.roots, args.instance.as_deref(), manifest_path)?;
     let root = RootMapping::new(metadata.top.clone(), selected.wave_root.clone());
 
-    // The recording carries its own identity: two runs of the same design write
-    // the same file name, so the content digest recorded in the manifest is what
-    // proves that this file is the one the manifest was written for
-    // (REQ-DBG-010). The manifest verifies it itself, so there is exactly one
-    // implementation of that check.
-    let verified = match &manifest.wave {
-        Some(_) => manifest.verify_wave(dir).map_err(|error| match error {
-            // The library compares the recorded digest with the file it finds;
-            // name the run and the two digests in the CLI's own words, because
-            // the shared message talks about symbols and this is about the
-            // recording's identity.
-            Error::BuildIdMismatch { expected, found } => {
-                recording_mismatch(&manifest, &expected, &found)
-            }
-            other => classify_manifest_error(other),
-        })?,
-        None => {
-            return Err(DebugFailure::from(invalid_metadata(format!(
-                "{} records no waveform, so its recording cannot be identified; \
-                 use the manifest of a run that recorded one, or pair an external \
-                 fixture with --metadata and --assume-build-id",
-                manifest_path.display()
-            ))))
-        }
-    };
-
-    // An explicit recording must be that same file, so two runs can never be
-    // mixed by pointing one manifest at another run's path.
     let recording = match &args.recording {
-        Some(explicit) => {
-            if !same_recording(explicit, &verified) {
-                return Err(DebugFailure::from(invalid_metadata(format!(
-                    "RECORDING {} is not the recording of {} ({}); pass one of them",
-                    explicit.display(),
-                    manifest_path.display(),
-                    verified.display()
-                ))));
-            }
-            explicit.clone()
+        Some(explicit) => explicit.clone(),
+        None => {
+            let wave = manifest.wave.as_ref().ok_or_else(|| {
+                DebugFailure::from(invalid_metadata(format!(
+                    "{} records no waveform; pass the recording explicitly",
+                    manifest_path.display()
+                )))
+            })?;
+            dir.join(&wave.path)
         }
-        None => verified,
     };
 
     Ok(DebugPairing {
@@ -796,8 +719,8 @@ fn pairing_from_manifest(
     })
 }
 
-/// External fixture mode: metadata plus a recording that was not produced by
-/// `shyhdl test`, paired by an explicit assertion.
+/// An external recording: metadata plus a waveform that was not produced by
+/// `shyhdl test`.
 fn pairing_from_metadata(args: &DebugArgs) -> std::result::Result<DebugPairing, DebugFailure> {
     // The argument layer guarantees these three together.
     let metadata_path = args.metadata.as_deref().ok_or_else(|| {
@@ -808,19 +731,6 @@ fn pairing_from_metadata(args: &DebugArgs) -> std::result::Result<DebugPairing, 
         .clone()
         .ok_or_else(|| invalid_metadata("RECORDING is required with --metadata".to_string()))?;
     let metadata = read_metadata(metadata_path)?;
-
-    let assumed = args.assume_build_id.as_deref().ok_or_else(|| {
-        invalid_metadata(
-            "a recording carries no build identity of its own: pass --assume-build-id <ID> to state              which build it came from, or use --manifest from `shyhdl test`"
-                .to_string(),
-        )
-    })?;
-    if assumed != metadata.build_id {
-        return Err(DebugFailure::from(Error::BuildIdMismatch {
-            expected: metadata.build_id.clone(),
-            found: assumed.to_string(),
-        }));
-    }
 
     let wave_root = args
         .wave_root
@@ -838,7 +748,7 @@ fn pairing_from_metadata(args: &DebugArgs) -> std::result::Result<DebugPairing, 
 }
 
 /// The DUT instance of a manifest whose recording root is used, or an error
-/// listing the candidates. Never a suffix guess (REQ-DBG-026).
+/// listing the candidates. Never a suffix guess.
 fn select_root<'a>(
     roots: &'a [simulation::RootMapping],
     instance: Option<&str>,
@@ -877,14 +787,14 @@ fn select_root<'a>(
 ///
 /// An explicit choice always wins: `--clock` names a signal path in the
 /// recording, `--grid-interval` selects the fixed grid, and the two are
-/// mutually exclusive (REQ-DBG-020, REQ-DBG-022).
+/// mutually exclusive.
 ///
 /// With neither given, the reference clock comes from the testcase that
 /// produced the recording: the manifest lists the clocks it generated
 /// (`gen_clk(...)` / `clock!`), and only the candidates whose `var` is the
 /// selected DUT instance count. Exactly one is used; none, several, or a
 /// candidate that is not in the recording are reported rather than guessed
-/// (REQ-DBG-021). Nothing is inferred from the source: a clock is an ordinary
+/// Nothing is inferred from the source: a clock is an ordinary
 /// input, so the design carries no clock marking at all.
 fn debug_step_mode(
     args: &DebugArgs,
@@ -981,7 +891,7 @@ impl From<DebugError> for DebugFailure {
         let code = match &error {
             DebugError::UnsupportedType { .. } => exit::NOT_IMPLEMENTED,
             // The symbols and the recording disagree about the design: refuse
-            // rather than read a value from the wrong signal (REQ-DBG-010).
+            // rather than read a value from the wrong signal.
             DebugError::RootMapping { .. } | DebugError::WidthMismatch { .. } => exit::REFUSED,
             DebugError::Symbols(error) => exit_code_for(error),
             DebugError::Io { .. } | DebugError::Waveform(_) | DebugError::Session(_) => {
@@ -1009,47 +919,10 @@ fn invalid_metadata(message: String) -> Error {
     Error::InvalidMetadata { message }
 }
 
-/// Read a design metadata file and validate it.
+/// Read a design metadata file.
 fn read_metadata(path: &Path) -> Result<DesignMetadata> {
     let json = read_text(path)?;
     DesignMetadata::from_json_str(&json)
-}
-
-/// The recording is not the one the manifest was written for: name the run and
-/// both content digests instead of reading a value from a stray file.
-fn recording_mismatch(
-    manifest: &simulation::RunManifest,
-    expected: &str,
-    found: &str,
-) -> DebugFailure {
-    let named = manifest
-        .wave
-        .as_ref()
-        .map(|wave| wave.path.as_str())
-        .unwrap_or("<no recording>");
-    DebugFailure::from(invalid_metadata(format!(
-        "the recording {named} is not the one run {} wrote (recorded content digest {expected}, found {found}); re-run `shyhdl test` to pair them",
-        manifest.run_id
-    )))
-}
-
-/// A manifest whose content is unusable is a refused pairing rather than a
-/// source-level compile error, so its validation failure is reported as invalid
-/// metadata.
-fn classify_manifest_error(error: Error) -> DebugFailure {
-    match error {
-        Error::TypeLayout { message, .. } => DebugFailure::from(Error::InvalidMetadata { message }),
-        other => DebugFailure::from(other),
-    }
-}
-
-/// Whether two paths name the same file. Paths that cannot be canonicalized
-/// (a file that does not exist yet) are compared as written.
-fn same_recording(left: &Path, right: &Path) -> bool {
-    match (left.canonicalize(), right.canonicalize()) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => left == right,
-    }
 }
 
 /// Quote one GDB argument so the printed command line can be pasted into a
@@ -1151,7 +1024,7 @@ fn parse_name(text: &str) -> std::result::Result<String, String> {
 }
 
 /// Integer duration with an explicit unit, for example `10ns`. Fractional
-/// values and unitless numbers are rejected rather than rounded (REQ-TEST-004).
+/// values and unitless numbers are rejected rather than rounded.
 fn parse_duration(text: &str) -> std::result::Result<Timescale, String> {
     Timescale::parse(text).map_err(|error| error.to_string())
 }

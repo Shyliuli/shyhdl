@@ -2,7 +2,7 @@
 //
 // Two-stage pipeline. `stage1` is a module-scope value written only by the
 // sequential process, so it is a register; `self.q` samples the *old* `stage1`
-// because state assignments commit non-blocking (REQ-LANG-014, REQ-LANG-016).
+// because state assignments commit non-blocking.
 // Reading `stage1` from wiring observes the committed register value.
 
 #[hardware_instance]

@@ -3,8 +3,8 @@
 //! Every expression is lowered with the width and the kind it is used at,
 //! because the generated Verilog must not silently change meaning:
 //!
-//! * a value that does not fit its context is a source-located error
-//!   (REQ-LANG-034) instead of a quietly truncated comparison;
+//! * a value that does not fit its context is a source-located error instead of
+//!   a quietly truncated comparison;
 //! * `!` follows Rust: `!x` on a `bool` is logical negation and produces one
 //!   bit, while `!x` on a `uint<N>` is the bitwise complement of all N bits;
 //! * arithmetic, shifts and comparisons need integer operands, conditions need
@@ -362,7 +362,7 @@ fn check_literal_fits(
         return Err(generator.error(span, "a value must be between 1 and 128 bits wide"));
     }
     if signed {
-        // Two's complement: -2^(w-1) ..= 2^(w-1) - 1.
+        // Two's complement: -2^(w-1)..= 2^(w-1) - 1.
         let limit = 1u128 << (width - 1);
         if literal.negative {
             if literal.value > limit {
@@ -1252,7 +1252,7 @@ impl<'a> Generator<'a> {
         for candidate in fields {
             let width = candidate.ty.bit_width()?;
             if candidate.name == member {
-                // Fields are laid out most significant first (REQ-LANG-003), so
+                // Fields are laid out most significant first, so
                 // the field's low bit is `total - prefix - width`.
                 let lo = total - prefix - width;
                 let constant = base
