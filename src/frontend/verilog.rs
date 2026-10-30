@@ -252,9 +252,8 @@ fn statements(module: &Module, list: &[Stmt], indent: usize, out: &mut String) {
                 target,
                 value,
                 nonblocking,
-                source,
+                ..
             } => {
-                let _ = source;
                 let operator = if *nonblocking { "<=" } else { "=" };
                 let _ = writeln!(
                     out,
@@ -267,9 +266,8 @@ fn statements(module: &Module, list: &[Stmt], indent: usize, out: &mut String) {
                 cond,
                 then_body,
                 else_body,
-                source,
+                ..
             } => {
-                let _ = source;
                 let _ = writeln!(out, "{pad}if ({}) begin", expression(module, cond));
                 statements(module, then_body, indent + 1, out);
                 if else_body.is_empty() {
@@ -284,9 +282,8 @@ fn statements(module: &Module, list: &[Stmt], indent: usize, out: &mut String) {
                 memory,
                 addr,
                 value,
-                source,
+                ..
             } => {
-                let _ = source;
                 let memory = &module.memories[*memory];
                 let _ = writeln!(
                     out,
@@ -303,9 +300,8 @@ fn statements(module: &Module, list: &[Stmt], indent: usize, out: &mut String) {
                 scrutinee,
                 arms,
                 default,
-                source,
+                ..
             } => {
-                let _ = source;
                 let _ = writeln!(
                     out,
                     "{pad}{} ({})",
