@@ -30,6 +30,9 @@ pub mod lsp;
 pub mod metadata;
 #[cfg(feature = "nvboard")]
 pub mod nvboard;
+// Crate-private: the width, signedness and layout rules the frontend and the
+// testbench both lower by. Not a public API.
+mod packed;
 // Crate-private: normalized match patterns and coverage, shared by the
 // frontend's `match` lowering and the testbench. Not a public API yet.
 mod pattern;
@@ -44,7 +47,7 @@ pub use editor::*;
 pub use error::{Error, Result};
 pub use interop::{
     __inventory, build, check, list_tests, module_verilog, run, simulate, source_for, test,
-    test_verilog, verilog, Debugger, Hardware, PartKind, RegisteredPart, RunResult, Simulator,
+    test_verilog, verilog, Debugger, Hardware, Mem, PartKind, RegisteredPart, RunResult, Simulator,
     TestId, I, U,
 };
 #[cfg(feature = "nvboard")]

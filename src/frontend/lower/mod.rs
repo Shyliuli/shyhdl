@@ -20,9 +20,9 @@ use crate::frontend::analysis::{Bits, DependencyGraph};
 use crate::frontend::consteval::{self, ConstEnv};
 use crate::frontend::diagnostic::{codes, span_in, Diagnostic};
 use crate::frontend::mir::{
-    BodyItem, ClockSpec, Connection, Design, Edge, Expr, ExprKind, Instance, LValue, Module, Param,
-    Port, PortDir, Process, ProcessKind, ResetSpec, Signal, SignalId, SignalKind, SignalScope,
-    Stmt, Ty,
+    BodyItem, ClockSpec, Connection, Design, Edge, Expr, ExprKind, Instance, LValue, Memory,
+    Module, Param, Port, PortDir, Process, ProcessKind, ResetSpec, Signal, SignalId, SignalKind,
+    SignalScope, Stmt, Ty,
 };
 use crate::frontend::parse::{self, FieldKind, HwField, HwImpl, HwStruct, ParsedFile};
 use crate::metadata::SourceSpan;
@@ -146,6 +146,12 @@ struct ModuleBuild {
     ports: Vec<Port>,
     signals: Vec<Signal>,
     signal_by_name: HashMap<String, SignalId>,
+    /// Memory resources, in declaration order.
+    memories: Vec<Memory>,
+    memory_by_field: HashMap<String, usize>,
+    /// Process that already writes each memory, and where its first write was:
+    /// one memory may only be written by one process, or the two would race.
+    memory_writers: HashMap<usize, (usize, SourceSpan)>,
     instances: Vec<InstanceBuild>,
     instance_by_field: HashMap<String, FieldInstances>,
     body: Vec<BodyItem>,
@@ -175,6 +181,9 @@ impl ModuleBuild {
             ports: Vec::new(),
             signals: Vec::new(),
             signal_by_name: HashMap::new(),
+            memories: Vec::new(),
+            memory_by_field: HashMap::new(),
+            memory_writers: HashMap::new(),
             instances: Vec::new(),
             instance_by_field: HashMap::new(),
             body: Vec::new(),
@@ -196,6 +205,9 @@ impl ModuleBuild {
 /// State of the process currently being lowered.
 struct ProcCtx {
     comb: bool,
+    /// True while lowering the clock arm of `always!`: the only place a memory
+    /// write is allowed.
+    memory_write: bool,
     /// Index of this process in [`ModuleBuild::process_labels`]: the active
     /// authority for `Owner::Process`, instead of re-deriving it from a length.
     index: usize,
@@ -232,6 +244,7 @@ impl ProcCtx {
     fn new(comb: bool, index: usize) -> Self {
         Self {
             comb,
+            memory_write: false,
             index,
             at_run_top: false,
             locals: HashMap::new(),
@@ -1102,6 +1115,11 @@ impl Compiler {
                         failed = true;
                     }
                 }
+                FieldKind::Mem => {
+                    if self.build_memory(field).is_err() {
+                        failed = true;
+                    }
+                }
                 _ => {
                     if self.build_port(field).is_err() {
                         failed = true;
@@ -1300,7 +1318,8 @@ impl Compiler {
         let dir = match field.kind {
             FieldKind::In => PortDir::In,
             FieldKind::Out => PortDir::Out,
-            FieldKind::Instance => return Ok(()),
+            // Instances and memories are structure, declared elsewhere.
+            FieldKind::Instance | FieldKind::Mem => return Ok(()),
         };
         let result = self.resolve_type(&field.ty, field.span.clone());
         let Some(ty) = self.soft(result) else {
@@ -1326,6 +1345,74 @@ impl Compiler {
         Ok(())
     }
 
+    /// A `Mem<T, N>` field: an independent memory resource of the module.
+    ///
+    /// The element type is resolved like any other value type, so it reuses the
+    /// fixed layouts (`uint`, `int`, `bool`, structs, ...) and cannot itself be
+    /// a memory.
+    fn build_memory(&mut self, field: &HwField) -> Result<(), ()> {
+        let span = field.span.clone();
+        let Some((element, depth)) = parse::memory_type(&field.ty) else {
+            return self.err(
+                codes::BAD_TYPE,
+                Some(span),
+                format!("`{}` is not a memory declaration", field.name),
+            );
+        };
+        if let Err(diagnostic) = check_verilog_name(&field.name, "memory name", Some(span.clone()))
+        {
+            self.diagnostics.push(diagnostic);
+            return Err(());
+        }
+        let element = match self.resolve_type(&element, span.clone()) {
+            Ok(ty) => ty,
+            Err(diagnostic) => return self.error(diagnostic),
+        };
+        let depth = match consteval::eval(&depth, &self.cur.env) {
+            Ok(depth) => depth,
+            Err(message) => return self.err(codes::NOT_CONSTANT, Some(span), message),
+        };
+        if depth == 0 {
+            return self.err(
+                codes::BAD_TYPE,
+                Some(span),
+                format!("memory `{}` has depth 0", field.name),
+            );
+        }
+        if depth > u64::from(u32::MAX) {
+            return self.err(
+                codes::OUT_OF_RANGE,
+                Some(span),
+                format!(
+                    "memory `{}` has {depth} elements, more than the supported maximum",
+                    field.name
+                ),
+            );
+        }
+        if self.cur.signal_by_name.contains_key(&field.name)
+            || self.cur.instance_by_field.contains_key(&field.name)
+            || self.cur.memory_by_field.contains_key(&field.name)
+        {
+            return self.err(
+                codes::NAME_COLLISION,
+                Some(span),
+                format!(
+                    "`{}` collides with another signal, instance or memory in this module",
+                    field.name
+                ),
+            );
+        }
+        let index = self.cur.memories.len();
+        self.cur.memories.push(Memory {
+            name: field.name.clone(),
+            element,
+            depth: depth as u32,
+            source: span,
+        });
+        self.cur.memory_by_field.insert(field.name.clone(), index);
+        Ok(())
+    }
+
     fn build_instance(&mut self, field: &HwField) -> Result<(), ()> {
         let span = field.span.clone();
         if let Err(diagnostic) =
@@ -1333,6 +1420,16 @@ impl Compiler {
         {
             self.diagnostics.push(diagnostic);
             return Err(());
+        }
+        if self.cur.memory_by_field.contains_key(&field.name) {
+            return self.err(
+                codes::NAME_COLLISION,
+                Some(span),
+                format!(
+                    "`{}` is already declared in this module as a memory",
+                    field.name
+                ),
+            );
         }
 
         // `#[instance] bank: [Child; N]` is N instances of `Child`. Each element
@@ -1601,6 +1698,13 @@ impl Compiler {
                 format!("`{name}` is already declared in this module as {existing_ty}"),
             );
         }
+        if self.cur.memory_by_field.contains_key(name) {
+            return self.err(
+                codes::NAME_COLLISION,
+                source,
+                format!("`{name}` is already declared in this module as a memory"),
+            );
+        }
         let id = self.cur.signals.len();
         self.cur.signals.push(Signal {
             name: name.to_string(),
@@ -1839,6 +1943,7 @@ impl Compiler {
             ports: build.ports,
             instances,
             signals: build.signals,
+            memories: build.memories,
             body: build.body,
         })
     }

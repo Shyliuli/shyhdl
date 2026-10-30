@@ -158,13 +158,16 @@ impl Compiler {
 
 /// A name that is not used in the module yet.
 fn unique_name(build: &ModuleBuild, name: &str) -> String {
-    if !build.signal_by_name.contains_key(name) {
+    let used = |name: &str| {
+        build.signal_by_name.contains_key(name) || build.memory_by_field.contains_key(name)
+    };
+    if !used(name) {
         return name.to_string();
     }
     let mut index = 1;
     loop {
         let candidate = format!("{name}_{index}");
-        if !build.signal_by_name.contains_key(&candidate) {
+        if !used(&candidate) {
             return candidate;
         }
         index += 1;
@@ -199,6 +202,12 @@ fn rewrite_statement(
             for statement in else_body.iter_mut() {
                 rewrite_statement(statement, original, alias, owned, ty);
             }
+        }
+        // A memory is not split: it is never a signal, so only the address and
+        // the stored value can mention a split signal.
+        Stmt::MemWrite { addr, value, .. } => {
+            rewrite_expr(addr, original, alias, owned, ty);
+            rewrite_expr(value, original, alias, owned, ty);
         }
         Stmt::Case {
             scrutinee,
@@ -271,6 +280,7 @@ fn rewrite_expr(
         }
         ExprKind::Replicate { value, .. } => rewrite_expr(value, original, alias, owned, ty),
         ExprKind::BitSelect { index, .. } => rewrite_expr(index, original, alias, owned, ty),
+        ExprKind::MemRead { addr, .. } => rewrite_expr(addr, original, alias, owned, ty),
         ExprKind::Const { .. } => {}
         ExprKind::Pattern { .. } => {}
     }

@@ -124,6 +124,9 @@ impl Compiler {
                         source,
                     )?;
                 }
+                // A memory write is state, so it only exists in a clocked
+                // process and never reaches this rewrite.
+                Stmt::MemWrite { .. } => return Err(()),
                 Stmt::Case {
                     scrutinee,
                     arms,
@@ -513,13 +516,17 @@ impl Compiler {
 
     /// A signal name that is not used yet, with a stable suffix if needed.
     fn unique_signal_name(&self, name: &str) -> String {
-        if !self.cur.signal_by_name.contains_key(name) {
+        let used = |name: &str| {
+            self.cur.signal_by_name.contains_key(name)
+                || self.cur.memory_by_field.contains_key(name)
+        };
+        if !used(name) {
             return name.to_string();
         }
         let mut index = 1;
         loop {
             let candidate = format!("{name}_{index}");
-            if !self.cur.signal_by_name.contains_key(&candidate) {
+            if !used(&candidate) {
                 return candidate;
             }
             index += 1;
@@ -568,6 +575,12 @@ impl Compiler {
             ExprKind::BitSelect { signal, index } => ExprKind::BitSelect {
                 signal: flow.current.get(signal).copied().unwrap_or(*signal),
                 index: Box::new(self.substitute(index, flow)),
+            },
+            // The memory is not a versioned signal; only its address is
+            // rewritten, so a read still depends on the address this point sees.
+            ExprKind::MemRead { memory, addr } => ExprKind::MemRead {
+                memory: *memory,
+                addr: Box::new(self.substitute(addr, flow)),
             },
             ExprKind::Const { .. } => expr.kind.clone(),
             ExprKind::Pattern { .. } => expr.kind.clone(),

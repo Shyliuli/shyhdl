@@ -99,6 +99,27 @@ fn emit_module(module: &Module, out: &mut String) {
         }
     }
 
+    // A memory is an unpacked array of words, not a wider packed signal: that
+    // is the shape `read(addr)` and `write(addr, data)` address, and it stays a
+    // plain `reg` array whatever the synthesis tool decides to infer.
+    if !module.memories.is_empty() {
+        out.push('\n');
+        for memory in &module.memories {
+            let signing = if memory.element.is_signed() {
+                " signed"
+            } else {
+                ""
+            };
+            let _ = writeln!(
+                out,
+                "    reg{signing} [{}:0] {} [0:{}];",
+                memory.element.width() - 1,
+                memory.name,
+                memory.depth - 1
+            );
+        }
+    }
+
     // Instances first, then the continuous wiring, then the processes: the
     // connection order in the source does not change the emitted topology
     let mut wrote_section = false;
@@ -259,6 +280,24 @@ fn statements(module: &Module, list: &[Stmt], indent: usize, out: &mut String) {
                     let _ = writeln!(out, "{pad}end");
                 }
             }
+            Stmt::MemWrite {
+                memory,
+                addr,
+                value,
+                source,
+            } => {
+                let _ = source;
+                let memory = &module.memories[*memory];
+                let _ = writeln!(
+                    out,
+                    "{pad}{}[{}] <= {};",
+                    memory.name,
+                    // The address is unsigned by type, whatever the signal it
+                    // was read from is declared as.
+                    typed_operand(module, addr),
+                    expression(module, value)
+                );
+            }
             Stmt::Case {
                 kind,
                 scrutinee,
@@ -344,6 +383,14 @@ fn expression(module: &Module, expr: &Expr) -> String {
             format!("{{{}{{{}}}}}", count, expression(module, value))
         }
         ExprKind::BitSelect { signal, index } => bit_select(module, *signal, index),
+        ExprKind::MemRead { memory, addr } => {
+            let memory = &module.memories[*memory];
+            // An index past the last element reads `x` in Verilog, which is the
+            // unknown this language wants; nothing is added to guard it. The
+            // address is marked unsigned by its type, so a signed signal cannot
+            // turn it into a negative index.
+            format!("{}[{}]", memory.name, typed_operand(module, addr))
+        }
     }
 }
 

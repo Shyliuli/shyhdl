@@ -76,6 +76,9 @@ fn wraps() {
 
 - `U<N>` / `I<N>`：源码里的 `uint<N>` / `int<N>`。它们是库内标记类型，前端按硬件宽度解释，
   不参与 Rust 的真实算术。
+- `Mem<T, N>`：存储器资源，只能作为 `#[hardware_instance]` 结构体的字段出现。它不是值类型，
+  没有位宽；`read(addr)` 是读取表达式，`write(addr, data)` 只能在 `always!` 的时钟臂里当语句用。
+  宏与 rust-analyzer 靠这两个方法理解源码，真正的硬件语义由前端实现。
 - `TestId`：`#[hardware_test]` 占位函数返回的测试标识。
 - `Simulator`：一次性编译出的设计，可以反复 `run`。
 - `RunResult`：一次运行的结果，含 `outcome`、`reason`、`test_name`、`wave_path`、
@@ -141,6 +144,9 @@ dbg.run()?;                // 阻塞，等一个 GDB 会话
 - `elf_path()`：本次会话的合成调试 ELF（每个信号一个变量，每个观察点一行）。
 - `gdb_argv()`：可直接执行的 GDB 命令行，已包含只读开关与 `target remote`。
 - `run()`：只服务一个 GDB 会话，会话结束后返回。
+
+`Mem<T, N>` 的内容不在调试元数据里：回放和 GDB 只能看到设计信号，看不到 memory 里的元素。
+它不是被展平成一个大值，也不会伪造出一个 packed 值。
 
 符号名规则：`<instance_path>__<source_name>`（如 `Encoder38__sig`），源名在设计里唯一时还会
 有短名别名（`sig`）。

@@ -18,7 +18,7 @@ use crate::error::{Error, Result};
 use crate::metadata::{SourceSpan, ValueType};
 use crate::pattern::{self, Alternative, ConstResolver, Coverage, Missing, PatError, Test};
 
-use super::expr::{contains_enum, Driver, Kind, Lowered, ValueRef, WidthContext};
+use super::expr::{Driver, Kind, Lowered, ValueRef, WidthContext};
 use super::{DesignInfo, ModulePort, TimeScale};
 
 /// Names of the generated result-protocol counters.
@@ -3103,7 +3103,7 @@ impl<'a> Generator<'a> {
                 // An enum-shaped comparison is built part by part; the failure line
                 // still prints both operands as whole values.
                 let condition = match left.ty.as_ref().or(right.ty.as_ref()) {
-                    Some(ty) if contains_enum(ty) => {
+                    Some(ty) if crate::packed::contains_enum(ty) => {
                         self.typed_comparison(&left_expr, &right_expr, mac.span())?
                     }
                     _ => None,

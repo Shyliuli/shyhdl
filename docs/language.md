@@ -144,7 +144,8 @@ fn run(&mut self) {
 - `enum` 编码为标签加最大 payload 尺寸；未使用的 payload 位填零。类型相等按 variant 与有效
   字段比较。
 - `Option` / `Result` 是普通 enum，不会自动映射成 ready/valid 握手。
-- 数组 `[T; N]` 是固定布局的值类型，元素 0 在最低位；不会被推断成 RAM。
+- 数组 `[T; N]` 是固定布局的值类型，元素 0 在最低位；不会被推断成 RAM。需要存储器时用下面的
+  `Mem<T, N>` 资源。
 - 元组 `(A, B)` 是匿名字段的结构体：元素按位置从高位排到低位，用 `.0`、`.1` 读取，也可以
   赋值。它主要用于函数返回多个值。
 - `let` 支持解构：元组 `let (a, b) = v;`、结构体 `let Point { x, y } = p;`、嵌套模式、
@@ -153,6 +154,54 @@ fn run(&mut self) {
 - `enum` 的 payload 解构请用 `match`：`let Some(v) = o;` 会报错并提示改用 `match`，因为
   `let` 没有失败分支可以处理。
 - 端口和信号可以是这些类型的组合。
+
+## 存储器
+
+`Mem<T, N>` 是模块里的独立资源，不是一种值：它不展平成打包值，也不能整体赋值、作为端口、
+嵌入普通结构体或参与算术。它只能写成 `#[hardware_instance]` 结构体的字段，
+元素类型复用固定布局的值类型（`uint`、`int`、`bool`、普通 `struct`、数组等）：
+
+```rust
+#[hardware_instance]
+struct Ram {
+    #[In] clk: bool,
+    #[In] we: bool,
+    #[In] addr: uint<8>,
+    #[In] wdata: uint<32>,
+    #[Out] rdata: uint<32>,
+    mem: Mem<uint<32>, 256>,        // 256 个 32 位字，没有 #[In]/#[Out]
+}
+
+impl Hardware for Ram {
+    fn run(&mut self) {
+        self.rdata = self.mem.read(self.addr);   // 读取表达式，本身不寄存
+
+        always! {
+            #[Pedge] self.clk => {
+                if self.we {
+                    self.mem.write(self.addr, self.wdata);   // 非阻塞写
+                }
+            }
+        }
+    }
+}
+```
+
+宏模式里字段类型写作 `Mem<U<32>, 256>`：`U` / `I` 是 `uint` / `int` 在普通 Rust 代码里的拼写。
+
+- **`read(addr)` 是表达式**：组合过程和 `always!` 时序过程都能用；它的结果不是寄存器，写在
+  时钟臂里的赋值才是。地址必须是无符号值。结构体元素可以整体读入，也可以直接取字段：
+  `self.mem.read(addr).field`。
+- **`write(addr, data)` 只允许 `always!` 的时钟臂**：组合过程和异步复位臂都会在构建期报错；
+  写入生成非阻塞赋值。同一过程可以写多次，按源码顺序最后写优先；不同过程写同一个存储器会在
+  构建期报竞争错误。
+- **常量地址越界**在构建期报错；动态地址越界时，读得到未知值，写不产生效果（Verilog 的数组
+  语义）。
+- **组合依赖**：`read` 依赖它的地址；memory 本体不把写入数据变成组合依赖（写入只发生在时钟
+  沿）。数组 `[T; N]` 仍是值，不是存储器。
+- **生成物**：`reg [W-1:0] mem [0:N-1]`（元素有符号时带 `signed`），是普通 unpacked 数组，
+  不承诺推断成 BRAM，也不固定读/写端口数量。没有初始化语法。
+- **调试边界**：memory 内容不进入调试元数据，回放与 GDB 会话看不到其中的元素。
 
 ## 匹配
 

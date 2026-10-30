@@ -41,6 +41,32 @@ pub struct U<const W: usize>;
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq)]
 pub struct I<const W: usize>;
 
+/// A memory resource: `N` elements of `T`, addressed by `read` / `write`.
+///
+/// This is not a value type and not a marker for one: a field of this type is a
+/// separate resource of the module (an unpacked `reg [W-1:0] mem [0:N-1]` in the
+/// generated Verilog), so it has no bit width to flatten into the packed value
+/// types. Declaring it is the only place it may appear; `read(addr)` is an
+/// expression and `write(addr, data)` is a statement that belongs in the clock
+/// arm of `always!`. The methods exist so the macros and rust-analyzer accept
+/// those calls; the frontend is what gives them hardware meaning.
+pub struct Mem<T, const N: usize> {
+    _element: std::marker::PhantomData<T>,
+}
+
+impl<T, const N: usize> Mem<T, N> {
+    /// Read the element at `addr`.
+    pub fn read<A>(&self, _addr: A) -> T {
+        unreachable!("memories are compiled by ShyHDL, not executed by Rust")
+    }
+
+    /// Write `data` to `addr`. A write is only meaningful in the clock arm of
+    /// `always!`, where it becomes a non-blocking assignment.
+    pub fn write<A>(&mut self, _addr: A, _data: T) {
+        unreachable!("memories are compiled by ShyHDL, not executed by Rust")
+    }
+}
+
 /// The hardware behaviour of a design: what its combinational and clocked
 /// logic does.
 ///

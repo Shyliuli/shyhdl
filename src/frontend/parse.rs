@@ -81,6 +81,44 @@ pub(crate) enum FieldKind {
     Out,
     /// `#[instance]`
     Instance,
+    /// A field of type `Mem<T, N>`: a memory resource, recognised by its type
+    /// instead of a marker because the type is what the Rust side can name.
+    Mem,
+}
+
+/// The element type and depth of a `Mem<T, N>` field type.
+pub(crate) fn memory_type(ty: &syn::Type) -> Option<(syn::Type, syn::Expr)> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    if path.qself.is_some() || path.path.leading_colon.is_some() || path.path.segments.len() != 1 {
+        return None;
+    }
+    let segment = path.path.segments.last()?;
+    if segment.ident != "Mem" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    let mut arguments = arguments.args.iter();
+    let Some(syn::GenericArgument::Type(element)) = arguments.next() else {
+        return None;
+    };
+    let depth = arguments.next().and_then(const_argument)?;
+    if arguments.next().is_some() {
+        return None;
+    }
+    Some((element.clone(), depth))
+}
+
+/// True when a type path is spelled `Mem...`, even if it is malformed: the
+/// caller can then report what a memory declaration needs instead of treating
+/// the field as a value.
+pub(crate) fn spells_memory(ty: &syn::Type) -> bool {
+    matches!(ty, syn::Type::Path(path)
+        if path.qself.is_none()
+            && path.path.segments.last().is_some_and(|segment| segment.ident == "Mem"))
 }
 
 /// One field of a hardware struct.
@@ -480,6 +518,54 @@ fn hardware_struct(
             }
         }
 
+        // A `Mem<T, N>` field is a memory resource, so its type is its marker.
+        // It is not a port and not an instance, and no attribute may say it is.
+        if memory_type(&field.ty).is_some() {
+            if !kinds.is_empty() {
+                let names: Vec<&str> = kinds.iter().map(|(_, text)| *text).collect();
+                diagnostics.push(
+                    Diagnostic::error(
+                        codes::DECLARATION,
+                        field_span.clone(),
+                        format!(
+                            "memory `{field_name}` is a resource of this module, not a port: \
+                             it takes no {} marker",
+                            names.join(" / ")
+                        ),
+                    )
+                    .with_note(
+                        "declare it as `mem: Mem<T, N>`, then `mem.read(addr)` / `mem.write(addr, data)`",
+                        None,
+                    ),
+                );
+                continue;
+            }
+            if removed_marker {
+                continue;
+            }
+            parsed_fields.push(HwField {
+                name: field_name,
+                kind: FieldKind::Mem,
+                ty: field.ty.clone(),
+                span: field_span,
+            });
+            continue;
+        }
+        if spells_memory(&field.ty) {
+            diagnostics.push(
+                Diagnostic::error(
+                    codes::BAD_TYPE,
+                    field_span.clone(),
+                    format!("memory `{field_name}` needs its element type and depth"),
+                )
+                .with_note(
+                    format!("declare it as `{field_name}: Mem<uint<8>, 256>`"),
+                    None,
+                ),
+            );
+            continue;
+        }
+
         let kind = match kinds.len() {
             0 if removed_marker => continue,
             0 => {
@@ -489,7 +575,10 @@ fn hardware_struct(
                         field_span.clone(),
                         format!("field `{field_name}` of hardware instance `{name}` has no marker"),
                     )
-                    .with_note("mark it #[In], #[Out] or #[instance]", None),
+                    .with_note(
+                        "mark it #[In], #[Out] or #[instance], or declare it as a memory with `Mem<T, N>`",
+                        None,
+                    ),
                 );
                 continue;
             }

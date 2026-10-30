@@ -445,6 +445,24 @@ impl Signal {
     }
 }
 
+/// One memory resource of a module: `N` elements of an element type, kept
+/// separate from the packed value types.
+///
+/// A memory is not a signal and has no width of its own; [`Ty`] never describes
+/// one. Its element type reuses the fixed-layout value types, so an element is
+/// read and written as an ordinary value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Memory {
+    /// Name in the generated Verilog: the source field name.
+    pub name: String,
+    /// Type of one element.
+    pub element: Ty,
+    /// Number of elements, at least 1.
+    pub depth: u32,
+    /// Where the field was declared.
+    pub source: SourceSpan,
+}
+
 /// A module port, projected out of [`Module::signals`] for consumers such as
 /// testbench generation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -666,6 +684,11 @@ pub enum ExprKind {
     Replicate { count: u32, value: Box<Expr> },
     /// Indexed bit select with a run-time index.
     BitSelect { signal: SignalId, index: Box<Expr> },
+    /// `mem[addr]`: one element of a memory, read as a value.
+    ///
+    /// A read does not register anything and is not a signal: in a clocked
+    /// process the assignment it feeds is what registers the value.
+    MemRead { memory: usize, addr: Box<Expr> },
 }
 
 /// One statement inside a process.
@@ -694,6 +717,17 @@ pub enum Stmt {
         scrutinee: Expr,
         arms: Vec<CaseArm>,
         default: Option<Vec<Stmt>>,
+        source: SourceSpan,
+    },
+    /// `mem[addr] <= value`: a non-blocking write to one element.
+    ///
+    /// It only appears in the clock arm of a sequential process: a memory is
+    /// state, so a combinational process or an asynchronous reset arm cannot
+    /// write one.
+    MemWrite {
+        memory: usize,
+        addr: Expr,
+        value: Expr,
         source: SourceSpan,
     },
 }
@@ -839,6 +873,8 @@ pub struct Module {
     pub instances: Vec<Instance>,
     /// All signals of the module, ports included.
     pub signals: Vec<Signal>,
+    /// Memory resources, in declaration order.
+    pub memories: Vec<Memory>,
     /// Body items; instances are also reachable through [`Module::instances`].
     pub body: Vec<BodyItem>,
 }

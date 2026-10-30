@@ -2,6 +2,8 @@
 
 use super::*;
 use crate::frontend::mir::{BinOp, EnumTy, EnumVariantTy, UnOp};
+use crate::metadata::ValueType;
+use crate::packed;
 
 impl Compiler {
     pub(super) fn lower_expr_top(
@@ -28,8 +30,10 @@ impl Compiler {
             syn::Expr::Field(field) => {
                 // `cells[i].tag` is not a place: the element is selected first,
                 // and the field is read from that value. A static chain
-                // (`self.pkt.op`) is a place and takes the ordinary path.
-                if self.has_run_time_index(expr) {
+                // (`self.pkt.op`) is a place and takes the ordinary path. A
+                // method call is a value too, so `mem.read(a).field` reads the
+                // element first and then its field.
+                if self.has_run_time_index(expr) || is_method_call_value(&field.base) {
                     self.lower_value_field(field, span)
                 } else {
                     self.lower_place_read(expr, span)
@@ -178,6 +182,14 @@ impl Compiler {
                 kind: ExprKind::Signal(signal),
                 source: span,
             });
+        }
+        if self.cur.memory_by_field.contains_key(name) {
+            return Err(Diagnostic::error(
+                codes::BAD_TYPE,
+                Some(span),
+                format!("`{name}` is a memory, not a value"),
+            )
+            .with_note(format!("read one element with `{name}.read(addr)`"), None));
         }
         let mut diagnostic = Diagnostic::error(
             codes::UNKNOWN_NAME,
@@ -393,8 +405,7 @@ impl Compiler {
         if matches!(op, BinOp::Eq | BinOp::Ne)
             && (mentions_shape(&lhs.ty) || mentions_shape(&rhs.ty))
         {
-            require_same_width(&lhs.ty, &rhs.ty, op, &span)?;
-            require_same_signedness(&lhs.ty, &rhs.ty, op, &span)?;
+            require_aligned(&lhs.ty, &rhs.ty, op, &span)?;
             if !same_shape(&lhs.ty, &rhs.ty) {
                 return Err(Diagnostic::error(
                     codes::WIDTH_MISMATCH,
@@ -406,8 +417,9 @@ impl Compiler {
                     ),
                 ));
             }
-            if mentions_enum(&lhs.ty) {
-                let equal = self.typed_equality(&lhs, &rhs, &lhs.ty.clone(), &span)?;
+            let value_ty = lhs.ty.to_value_type();
+            if packed::contains_enum(&value_ty) {
+                let equal = self.typed_equality(&lhs, &rhs, &value_ty, &span)?;
                 let kind = if op == BinOp::Ne {
                     ExprKind::Unary {
                         op: UnOp::Not,
@@ -441,8 +453,7 @@ impl Compiler {
                         ),
                     ));
                 }
-                require_same_width(&lhs.ty, &rhs.ty, op, &span)?;
-                require_same_signedness(&lhs.ty, &rhs.ty, op, &span)?;
+                require_aligned(&lhs.ty, &rhs.ty, op, &span)?;
                 lhs.ty.clone()
             }
             BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
@@ -453,8 +464,7 @@ impl Compiler {
                         "bitwise operators are not supported on struct values",
                     ));
                 }
-                require_same_width(&lhs.ty, &rhs.ty, op, &span)?;
-                require_same_signedness(&lhs.ty, &rhs.ty, op, &span)?;
+                require_aligned(&lhs.ty, &rhs.ty, op, &span)?;
                 match (&lhs.ty, &rhs.ty) {
                     (Ty::Bool, Ty::Bool) => Ty::Bool,
                     (Ty::UInt(width), _) => Ty::UInt(*width),
@@ -465,8 +475,7 @@ impl Compiler {
                 }
             }
             BinOp::Eq | BinOp::Ne => {
-                require_same_width(&lhs.ty, &rhs.ty, op, &span)?;
-                require_same_signedness(&lhs.ty, &rhs.ty, op, &span)?;
+                require_aligned(&lhs.ty, &rhs.ty, op, &span)?;
                 Ty::Bool
             }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
@@ -485,8 +494,7 @@ impl Compiler {
                         ),
                     ));
                 }
-                require_same_width(&lhs.ty, &rhs.ty, op, &span)?;
-                require_same_signedness(&lhs.ty, &rhs.ty, op, &span)?;
+                require_aligned(&lhs.ty, &rhs.ty, op, &span)?;
                 Ty::Bool
             }
             BinOp::LogAnd | BinOp::LogOr => {
@@ -1004,6 +1012,29 @@ impl Compiler {
         span: SourceSpan,
     ) -> Result<Expr, Diagnostic> {
         let method = call.method.to_string();
+        if let Some(memory) = self.memory_receiver(&call.receiver) {
+            return match method.as_str() {
+                "read" => self.lower_memory_read(memory, call, span),
+                "write" => Err(Diagnostic::error(
+                    codes::UNSUPPORTED,
+                    Some(span),
+                    "`write` is a statement, not a value",
+                )
+                .with_note(
+                    "write `mem.write(addr, data);` in the clock arm of `always!`",
+                    None,
+                )),
+                other => Err(Diagnostic::error(
+                    codes::UNKNOWN_NAME,
+                    Some(span),
+                    format!("a memory has no method `{other}`"),
+                )
+                .with_note(
+                    "memory methods are `read(addr)` and `write(addr, data)`",
+                    None,
+                )),
+            };
+        }
         let receiver = self.lower_expr(&call.receiver, None)?;
 
         match method.as_str() {
@@ -1221,6 +1252,129 @@ impl Compiler {
                 None,
             )),
         }
+    }
+
+    /// The memory an expression names as a receiver: exactly `self.mem` or the
+    /// implicit `mem`, and not something a process local shadows.
+    pub(super) fn memory_receiver(&self, receiver: &syn::Expr) -> Option<usize> {
+        let (is_self, base, path) = decompose_place(receiver).ok()?;
+        let name = if is_self {
+            match path.as_slice() {
+                [Component::Field(name)] => name.clone(),
+                _ => return None,
+            }
+        } else {
+            if !path.is_empty() {
+                return None;
+            }
+            base?
+        };
+        // Only the implicit `mem` lookup can be shadowed: `self.mem` names the
+        // field no matter what a local or a parameter is called.
+        if !is_self
+            && (self.cur.env.get(&name).is_some()
+                || self
+                    .proc
+                    .as_ref()
+                    .is_some_and(|context| context.locals.contains_key(&name)))
+        {
+            return None;
+        }
+        self.cur.memory_by_field.get(&name).copied()
+    }
+
+    /// The address of a memory access: an unsigned value, with a literal sized
+    /// to the address space and checked against the depth.
+    fn lower_memory_addr(
+        &mut self,
+        memory: usize,
+        addr: &syn::Expr,
+        span: &SourceSpan,
+    ) -> Result<Expr, Diagnostic> {
+        let depth = self.cur.memories[memory].depth;
+        let addr_span = self.span(addr.span()).unwrap_or_else(|| span.clone());
+        // A build-time constant address is folded first: `mem.read(N + 1)` and
+        // the index of a build-time `for` (`mem.write(BASE + i, d)`) are
+        // constants whose value is checked against the depth here, instead of
+        // leaving an expression the literal widths cannot type.
+        if let Ok(value) = consteval::eval(addr, &self.cur.env) {
+            if value >= u64::from(depth) {
+                return Err(Diagnostic::error(
+                    codes::OUT_OF_RANGE,
+                    Some(addr_span.clone()),
+                    format!(
+                        "address {value} is out of range for a memory of {depth} elements (valid: 0..{})",
+                        depth.saturating_sub(1)
+                    ),
+                ));
+            }
+            return typed_constant(i128::from(value), Ty::UInt(address_width(depth)), addr_span);
+        }
+        let lowered = self.lower_expr(addr, None)?;
+        if !matches!(lowered.ty, Ty::UInt(_)) {
+            return Err(Diagnostic::error(
+                codes::BAD_TYPE,
+                Some(span.clone()),
+                format!(
+                    "a memory address must be an unsigned value, and this is {}",
+                    lowered.ty.describe()
+                ),
+            ));
+        }
+        Ok(lowered)
+    }
+
+    /// `mem.read(addr)`: one element, as a value.
+    fn lower_memory_read(
+        &mut self,
+        memory: usize,
+        call: &syn::ExprMethodCall,
+        span: SourceSpan,
+    ) -> Result<Expr, Diagnostic> {
+        if call.args.len() != 1 {
+            return Err(Diagnostic::error(
+                codes::BAD_TYPE,
+                Some(span),
+                "`read` takes exactly one address",
+            ));
+        }
+        let addr = self.lower_memory_addr(memory, &call.args[0], &span)?;
+        Ok(Expr {
+            ty: self.cur.memories[memory].element.clone(),
+            kind: ExprKind::MemRead {
+                memory,
+                addr: Box::new(addr),
+            },
+            source: span,
+        })
+    }
+
+    /// The memory, address and value of a `mem.write(addr, data)` statement.
+    pub(super) fn lower_memory_write_parts(
+        &mut self,
+        call: &syn::ExprMethodCall,
+        span: &SourceSpan,
+    ) -> Result<(usize, Expr, Expr), Diagnostic> {
+        let Some(memory) = self.memory_receiver(&call.receiver) else {
+            return Err(Diagnostic::error(
+                codes::UNKNOWN_NAME,
+                Some(span.clone()),
+                "`write` is only defined on a memory",
+            )
+            .with_note("a memory is declared as a field of type `Mem<T, N>`", None));
+        };
+        if call.args.len() != 2 {
+            return Err(Diagnostic::error(
+                codes::BAD_TYPE,
+                Some(span.clone()),
+                "`write` takes an address and the element to store",
+            ));
+        }
+        let addr = self.lower_memory_addr(memory, &call.args[0], span)?;
+        let element = self.cur.memories[memory].element.clone();
+        let value = self.lower_expr_top(&call.args[1], Some(&element))?;
+        check_width(&element, None, &value, span.clone())?;
+        Ok((memory, addr, value))
     }
 
     /// Bits `[lo, hi)` of a value.
@@ -2465,107 +2619,141 @@ impl Compiler {
 
     /// `lhs == rhs`, read as the type says rather than as the packed bits say.
     ///
-    /// An enum compares its tag and the payload of the variant that is active:
-    /// the bits an inactive payload happens to hold are not part of the value
-    /// A struct or an array recurses field by field and element
-    /// by element, and a part with no enum inside compares as bits.
+    /// The parts come from [`packed::equality`]: an enum compares its tag and the
+    /// payload of the variant that is active, so the bits an inactive payload
+    /// happens to hold are not part of the value, while a part with no enum
+    /// inside compares as bits.
     fn typed_equality(
         &mut self,
         lhs: &Expr,
         rhs: &Expr,
-        ty: &Ty,
+        ty: &ValueType,
         span: &SourceSpan,
     ) -> Result<Expr, Diagnostic> {
-        let boolean = |kind: ExprKind| Expr {
-            ty: Ty::Bool,
-            kind,
-            source: span.clone(),
-        };
-        let equal_parts = |lhs: Expr, rhs: Expr| {
-            boolean(ExprKind::Binary {
-                op: BinOp::Eq,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            })
-        };
-        if !mentions_enum(ty) {
-            // Nothing enum-shaped inside: the bits are the value.
-            return Ok(equal_parts(lhs.clone(), rhs.clone()));
+        let plan = packed::equality(ty)
+            .map_err(|error| Diagnostic::error(codes::INTERNAL, Some(span.clone()), error))?;
+        // Every part is a bit range of the whole value, so a value that is not a
+        // signal is named once here instead of once per part.
+        let lhs = self.whole_value(lhs, span)?;
+        let rhs = self.whole_value(rhs, span)?;
+        self.equal_parts(&lhs, &rhs, &plan, span)
+    }
+
+    /// The value as a signal, or as a range of one: a value that is not a signal
+    /// is named into a temporary first.
+    fn whole_value(&mut self, value: &Expr, span: &SourceSpan) -> Result<Expr, Diagnostic> {
+        if self.as_signal(value).is_some() {
+            return Ok(value.clone());
         }
-        match ty {
-            Ty::Enum(enum_ty) => {
-                let tag_width = enum_ty.tag_width;
-                let lhs_tag = self.slice_value(lhs, 0, tag_width, span)?;
-                let rhs_tag = self.slice_value(rhs, 0, tag_width, span)?;
-                let tags_equal = equal_parts(lhs_tag.clone(), rhs_tag);
-                let mut payload_equal: Option<Expr> = None;
-                for variant in enum_ty.variants.iter().rev() {
-                    let Some(payload_ty) = &variant.payload else {
-                        continue;
-                    };
-                    let (lo, hi) = variant.payload_range(tag_width);
-                    let lhs_part = self.slice_value(lhs, lo, hi, span)?;
-                    let rhs_part = self.slice_value(rhs, lo, hi, span)?;
-                    let part_equal = self.typed_equality(&lhs_part, &rhs_part, payload_ty, span)?;
-                    let tag_is = equal_parts(
-                        lhs_tag.clone(),
-                        self.unsigned_constant(variant.tag, tag_width, span),
-                    );
-                    let selected = boolean(ExprKind::Ternary {
-                        cond: Box::new(tag_is),
-                        then_expr: Box::new(part_equal),
-                        else_expr: Box::new(
-                            payload_equal.unwrap_or_else(|| self.true_constant(span)),
-                        ),
+        let signal = self.materialize(value.clone(), span)?;
+        Ok(self.range_expr(signal, None, &value.ty, span.clone()))
+    }
+
+    /// The comparison one [`packed::Equality`] plan describes, read out of the
+    /// two whole values.
+    fn equal_parts(
+        &mut self,
+        lhs: &Expr,
+        rhs: &Expr,
+        plan: &packed::Equality,
+        span: &SourceSpan,
+    ) -> Result<Expr, Diagnostic> {
+        match plan {
+            packed::Equality::Bits { lo, width } => {
+                let lhs_part = self.slice_value(lhs, *lo, *lo + width, span)?;
+                let rhs_part = self.slice_value(rhs, *lo, *lo + width, span)?;
+                Ok(self.equal_exprs(lhs_part, rhs_part, span))
+            }
+            packed::Equality::All(parts) => {
+                let mut result: Option<Expr> = None;
+                for part in parts {
+                    let equal = self.equal_parts(lhs, rhs, part, span)?;
+                    result = Some(match result {
+                        Some(previous) => self.and_exprs(previous, equal, span),
+                        None => equal,
                     });
+                }
+                Ok(result.unwrap_or_else(|| self.true_constant(span)))
+            }
+            packed::Equality::Enum {
+                tag_lo,
+                tag_width,
+                variants,
+            } => {
+                let lhs_tag = self.slice_value(lhs, *tag_lo, *tag_lo + tag_width, span)?;
+                let rhs_tag = self.slice_value(rhs, *tag_lo, *tag_lo + tag_width, span)?;
+                let tags_equal = self.equal_exprs(lhs_tag.clone(), rhs_tag, span);
+                let mut payload_equal: Option<Expr> = None;
+                for (tag, payload) in variants.iter().rev() {
+                    let part_equal = self.equal_parts(lhs, rhs, payload, span)?;
+                    let tag_is = self.equal_exprs(
+                        lhs_tag.clone(),
+                        self.unsigned_constant(*tag, *tag_width, span),
+                        span,
+                    );
+                    let selected = self.ternary_expr(
+                        tag_is,
+                        part_equal,
+                        payload_equal.unwrap_or_else(|| self.true_constant(span)),
+                        span,
+                    );
                     payload_equal = Some(selected);
                 }
                 let payload = payload_equal.unwrap_or_else(|| self.true_constant(span));
-                Ok(boolean(ExprKind::Binary {
-                    op: BinOp::LogAnd,
-                    lhs: Box::new(tags_equal),
-                    rhs: Box::new(payload),
-                }))
+                Ok(self.and_exprs(tags_equal, payload, span))
             }
-            Ty::Struct(strukt) => {
-                let mut result: Option<Expr> = None;
-                for field in &strukt.fields {
-                    let (lo, hi) = (field.offset, field.offset + field.width);
-                    let lhs_part = self.slice_value(lhs, lo, hi, span)?;
-                    let rhs_part = self.slice_value(rhs, lo, hi, span)?;
-                    let equal = self.typed_equality(&lhs_part, &rhs_part, &field.ty, span)?;
-                    result = Some(match result {
-                        Some(previous) => boolean(ExprKind::Binary {
-                            op: BinOp::LogAnd,
-                            lhs: Box::new(previous),
-                            rhs: Box::new(equal),
-                        }),
-                        None => equal,
-                    });
-                }
-                Ok(result.unwrap_or_else(|| self.true_constant(span)))
-            }
-            Ty::Array { element, len } => {
-                let width = element.width();
-                let mut result: Option<Expr> = None;
-                for index in 0..*len {
-                    let (lo, hi) = (index * width, (index + 1) * width);
-                    let lhs_part = self.slice_value(lhs, lo, hi, span)?;
-                    let rhs_part = self.slice_value(rhs, lo, hi, span)?;
-                    let equal = self.typed_equality(&lhs_part, &rhs_part, element, span)?;
-                    result = Some(match result {
-                        Some(previous) => boolean(ExprKind::Binary {
-                            op: BinOp::LogAnd,
-                            lhs: Box::new(previous),
-                            rhs: Box::new(equal),
-                        }),
-                        None => equal,
-                    });
-                }
-                Ok(result.unwrap_or_else(|| self.true_constant(span)))
-            }
-            _ => Ok(equal_parts(lhs.clone(), rhs.clone())),
         }
+    }
+
+    /// A `bool` expression of `kind`.
+    fn bool_expr(&self, kind: ExprKind, span: &SourceSpan) -> Expr {
+        Expr {
+            ty: Ty::Bool,
+            kind,
+            source: span.clone(),
+        }
+    }
+
+    /// `lhs == rhs`.
+    fn equal_exprs(&self, lhs: Expr, rhs: Expr, span: &SourceSpan) -> Expr {
+        self.bool_expr(
+            ExprKind::Binary {
+                op: BinOp::Eq,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            },
+            span,
+        )
+    }
+
+    /// `lhs && rhs`.
+    fn and_exprs(&self, lhs: Expr, rhs: Expr, span: &SourceSpan) -> Expr {
+        self.bool_expr(
+            ExprKind::Binary {
+                op: BinOp::LogAnd,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            },
+            span,
+        )
+    }
+
+    /// `cond ? then_expr : else_expr`.
+    fn ternary_expr(
+        &self,
+        cond: Expr,
+        then_expr: Expr,
+        else_expr: Expr,
+        span: &SourceSpan,
+    ) -> Expr {
+        self.bool_expr(
+            ExprKind::Ternary {
+                cond: Box::new(cond),
+                then_expr: Box::new(then_expr),
+                else_expr: Box::new(else_expr),
+            },
+            span,
+        )
     }
 
     /// Bits `[lo, hi)` of a value, naming it first when it is not a signal.
@@ -2964,6 +3152,7 @@ impl Compiler {
             let mut name = format!("{hint}_reg");
             let mut suffix = 2;
             while self.cur.signal_by_name.contains_key(&name)
+                || self.cur.memory_by_field.contains_key(&name)
                 || self
                     .proc
                     .as_ref()
@@ -2976,11 +3165,13 @@ impl Compiler {
         }
         self.cur.temp_count += 1;
         let name = format!("t_l{}_c{}_{}", span.line, span.column, self.cur.temp_count);
-        if self.cur.signal_by_name.contains_key(&name) {
+        if self.cur.signal_by_name.contains_key(&name)
+            || self.cur.memory_by_field.contains_key(&name)
+        {
             return Err(Diagnostic::error(
                 codes::NAME_COLLISION,
                 Some(span.clone()),
-                format!("the compiler temporary `{name}` collides with a signal of this module; rename the signal"),
+                format!("the compiler temporary `{name}` collides with a signal or memory of this module; rename it"),
             ));
         }
         Ok(name)
@@ -3085,6 +3276,25 @@ impl Compiler {
     }
 }
 
+/// True when a field's base expression is a method call: such a value is not a
+/// place, so its field is read from the value (`mem.read(a).op`).
+fn is_method_call_value(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::MethodCall(_) => true,
+        // A nested field (`mem.read(a).outer.inner`) still reads out of the
+        // value the call produced, so it is not a place of this module.
+        syn::Expr::Field(field) => is_method_call_value(&field.base),
+        syn::Expr::Paren(paren) => is_method_call_value(&paren.expr),
+        syn::Expr::Group(group) => is_method_call_value(&group.expr),
+        _ => false,
+    }
+}
+
+/// Bits needed to address `depth` elements: at least one.
+fn address_width(depth: u32) -> u32 {
+    (u32::BITS - depth.saturating_sub(1).leading_zeros()).max(1)
+}
+
 /// The type an integer literal's suffix names, when it names one.
 ///
 /// `0xffu8` is a `uint<8>`: the suffix is the spelling that gives a literal a
@@ -3139,9 +3349,11 @@ fn signed_const_value(expr: &syn::Expr, env: &consteval::ConstEnv) -> Result<i12
 /// Verilog has no `8'sd-1`, and `-8'sd1` is what a negative constant has to be
 /// written as.
 fn typed_constant(value: i128, ty: Ty, span: SourceSpan) -> Result<Expr, Diagnostic> {
+    let negative = value < 0;
+    let magnitude = value.unsigned_abs();
     let fits = match &ty {
-        Ty::UInt(width) => fits_unsigned(value, *width),
-        Ty::SInt(width) => fits_signed(value, *width),
+        Ty::UInt(width) => packed::literal_fits(negative, magnitude, *width, false),
+        Ty::SInt(width) => packed::literal_fits(negative, magnitude, *width, true),
         Ty::Bool => (0..=1).contains(&value),
         // An aggregate is never the type of an integer constant; the callers
         // report that before reaching here.
@@ -3181,14 +3393,6 @@ fn typed_constant(value: i128, ty: Ty, span: SourceSpan) -> Result<Expr, Diagnos
     })
 }
 
-/// Does `value` fit in an unsigned `width`-bit value?
-///
-/// The comparison is done in `u128`: `1i128 << 127` is negative, so shifting an
-/// `i128` by a width would refuse `uint<127>` values that fit perfectly well.
-fn fits_unsigned(value: i128, width: u32) -> bool {
-    value >= 0 && (value as u128) <= low_mask(width)
-}
-
 /// The low `width` bits set: `2^width - 1`, saturated at `u128::MAX`.
 fn low_mask(width: u32) -> u128 {
     if width >= 128 {
@@ -3196,15 +3400,6 @@ fn low_mask(width: u32) -> u128 {
     } else {
         (1u128 << width) - 1
     }
-}
-
-/// Does `value` fit in a two's-complement `width`-bit value?
-fn fits_signed(value: i128, width: u32) -> bool {
-    if width >= 128 {
-        return true;
-    }
-    let bound = 1i128 << (width - 1);
-    value >= -bound && value < bound
 }
 
 /// The integer literal behind an expression, looking through parentheses.

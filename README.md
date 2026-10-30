@@ -14,7 +14,7 @@
 
 ## 抽象
 
-ShyHDL 只保留四层抽象，每一层都对应一个真实产物：
+ShyHDL 只保留五层抽象，每一层都对应一个真实产物：
 
 | 抽象 | 写法 | 产物 |
 | --- | --- | --- |
@@ -22,6 +22,7 @@ ShyHDL 只保留四层抽象，每一层都对应一个真实产物：
 | 组合逻辑 | `run` 里的顺序语句、`if`/`match`、构建期 `for` | 一个 `always @(*)` 过程 |
 | 组合函数 | `#[hardware_instance] fn`，一次调用一个实例 | 一个被调用的子模块 |
 | 时序 | `always!` 的事件臂，最后一个臂是时钟 | 一个 `always @(posedge)` 过程 |
+| 存储器 | `mem: Mem<T, N>` 字段、`mem.read(addr)`、`mem.write(addr, data)` | 一个 unpacked `reg [W-1:0] mem [0:N-1]` |
 
 这些抽象让硬件语义在源码里就写死，而不是等综合工具猜：
 
@@ -35,8 +36,9 @@ ShyHDL 只保留四层抽象，每一层都对应一个真实产物：
 - **运行是可回放的记录**。一次仿真交出 VCD/FST 和 run manifest，GDB 读记录做
   step/reverse-step/watch，不回跑仿真。
 
-这些抽象不追求"更高级的框架"：没有动态堆、递归、trait 对象和运行期循环。数组是固定布局
-的值，不会被推断成 RAM；需要存储器的设计把 RAM 放在设计外，用顶层端口连进来。
+这些抽象不追求"更高级的框架"：没有动态堆、递归、trait 对象和运行期循环。数组 `[T; N]` 是
+固定布局的值，不会被推断成 RAM；需要存储器时用独立的 `Mem<T, N>` 资源，它不参与值布局，也不会
+被展平成打包值。
 
 ## 特性
 
@@ -122,6 +124,7 @@ fn wraps() {
 | --- | --- |
 | 模块 | `#[hardware_instance] struct`、`#[instance]` 子实例、实例数组 `[Child; N]`、赋值连线、构建期常量泛型 |
 | 数据类型 | `bool`、`U<N>` / `uint<N>`、`I<N>` / `int<N>`、`struct`、带 payload 的 `enum`、`Option`、`Result`、`[T; N]` |
+| 存储器 | `mem: Mem<T, N>` 字段；`read(addr)` 是表达式，`write(addr, data)` 只在 `always!` 时钟臂里生成非阻塞写 |
 | 组合过程 | `run` 中的 `let`、解构绑定、赋值、`if`、`match`、构建期 `for`，按源码顺序求值；裸字段名等价于 `self.字段` |
 | 组合函数 | `#[hardware_instance] fn f(a: uint<4>) -> (uint<4>, bool)`，函数即组合实例，调用点 `let (x, y) = f(v);` 实例化一次 |
 | 时序过程 | 事件臂 `#[Pedge]` / `#[Nedge]`，最后一个臂是时钟，状态赋值非阻塞 |
@@ -142,7 +145,8 @@ $ cargo run -p shyhdl-example-select   # if / match 值、守卫、or 模式、O
 $ cargo run -p shyhdl-example-tour     # Rust 模块拆分：datapath / select / top
 ```
 
-单文件示例在 `examples/*.shy.rs`：`adder`、`signed`、`arrays`、`pipeline`、`register`、`packet`。
+单文件示例在 `examples/*.shy.rs`：`adder`、`signed`、`arrays`、`pipeline`、`register`、`packet`、
+`ram`。
 
 ## 上板验证（可选 feature）
 
@@ -202,7 +206,9 @@ if std::env::args().any(|arg| arg == "--nvboard") {
 - 语言是有限的、可静态展开的硬件描述子集：没有动态堆、递归、trait 对象与运行期循环。
 - 赋值与运算按硬件语义解释，不等同于 Rust 求值模型；`#[hardware] impl` 的函数体只被登记，
   不参与 Rust 编译。
-- 数组是固定布局的值类型，不会被推断成 RAM。
+- 数组是固定布局的值类型，不会被推断成 RAM；存储器是单独的 `Mem<T, N>` 资源，生成 unpacked
+  `reg` 数组。不承诺推断成 BRAM，也不固定读/写端口数量。
+- 存储器内容不进入调试元数据，回放与 GDB 会话看不到 memory 里的元素；它只能通过设计端口观察。
 - 模式匹配的规模上限：嵌套 16 层、单个臂最多 64 个备选、覆盖检查最多 4096 行、256 个并行
   列、65536 个单元，以及总计 100 万次访问。
 - Verilator 后端是二态语义，不声称完整四态仿真。

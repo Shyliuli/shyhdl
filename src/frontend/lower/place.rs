@@ -445,6 +445,21 @@ impl Compiler {
             let (range, ty) = self.place_range(&signal_ty, path, span)?;
             return Ok(Place::Signal { signal, range, ty });
         }
+        // A memory has no value of its own: only `read(addr)` and
+        // `write(addr, data)` name its contents, and neither is a place.
+        if self.cur.memory_by_field.contains_key(first) {
+            return Err(Diagnostic::error(
+                codes::BAD_TYPE,
+                Some(span.clone()),
+                format!("`{prefix}` is a memory, not a value"),
+            )
+            .with_note(
+                format!(
+                    "read one element with `{prefix}.read(addr)`, write one with `{prefix}.write(addr, data)`"
+                ),
+                None,
+            ));
+        }
         if let Some(entry) = self.cur.instance_by_field.get(first).copied() {
             // An array of instances is indexed by a build-time constant:
             // there is no hardware that could select an instance at run time.
@@ -946,6 +961,15 @@ impl Compiler {
                     Ty::UInt(width)
                 })
             }
+            "Mem" => Err(Diagnostic::error(
+                codes::BAD_TYPE,
+                Some(span),
+                "`Mem<T, N>` is a module resource, not a value type",
+            )
+            .with_note(
+                "declare it as a field of a `#[hardware_instance]` struct; it cannot be a port, a struct field, an array element or a signal",
+                None,
+            )),
             other => {
                 // `uint8` / `int8`: the width in the name, for the widths that
                 // were spelled that way before `uint<N>` existed.

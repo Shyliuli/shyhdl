@@ -357,6 +357,10 @@ impl Compiler {
             reset_bodies.push(body);
         }
         let mut clock_body = Vec::new();
+        // The clock arm is the only place a memory write is allowed: a memory is
+        // state, so neither the combinational process nor a reset arm may write
+        // one.
+        self.proc.as_mut().expect("process context").memory_write = true;
         self.lower_stmts(&resolved[clock_index].body.stmts, &mut clock_body)?;
         let context = self.proc.take().expect("process context");
 
@@ -574,6 +578,9 @@ impl Compiler {
         }
         let mut clock_body = Vec::new();
         if result.is_ok() {
+            // Only the clock branch may write a memory; the reset branches above
+            // were lowered with writes refused.
+            self.proc.as_mut().expect("process context").memory_write = true;
             result = self.lower_stmts(&branches[clock_index].1.stmts, &mut clock_body);
         }
         let context = self.proc.take().expect("process context");
@@ -1263,6 +1270,13 @@ impl Compiler {
             self.diagnostics.push(diagnostic);
             return Err(());
         }
+        if self.cur.memory_by_field.contains_key(name) {
+            return self.err(
+                codes::NAME_COLLISION,
+                Some(target_span),
+                format!("`{name}` is already declared in this module as a memory"),
+            );
+        }
         let index = self.current_process();
         self.claim_or_report(id, None, Owner::Process(index), &target_span)?;
         let old_name = self.cur.signal(id).name.clone();
@@ -1290,6 +1304,9 @@ impl Compiler {
             syn::Expr::If(item) => self.lower_process_if(item, expr, out),
             syn::Expr::Match(item) => self.lower_process_match(item, expr, out),
             syn::Expr::ForLoop(item) => self.lower_process_for(item, expr, out),
+            syn::Expr::MethodCall(call) if call.method == "write" => {
+                self.lower_memory_write(call, out)
+            }
             syn::Expr::MethodCall(call) if call.method == "run" => self.err(
                 codes::UNSUPPORTED,
                 self.span(call.span()),
@@ -1311,6 +1328,76 @@ impl Compiler {
                 format!("unsupported statement inside a process ({})", parse::describe_expr(other)),
             ),
         }
+    }
+
+    /// `mem.write(addr, data);`: a non-blocking write, legal only in the clock
+    /// arm of `always!`.
+    ///
+    /// A write is not a driver of any signal, so it never enters the per-bit
+    /// ownership table: one process may write the same memory as often as it
+    /// likes (the last write of an element in source order wins), while a second
+    /// writing process is rejected as a race.
+    fn lower_memory_write(
+        &mut self,
+        call: &syn::ExprMethodCall,
+        out: &mut Vec<Stmt>,
+    ) -> Result<(), ()> {
+        let span = self
+            .span(call.span())
+            .unwrap_or_else(|| self.cur.struct_source.clone());
+        if self.memory_receiver(&call.receiver).is_none() {
+            return self.err(
+                codes::UNKNOWN_NAME,
+                Some(span),
+                "`write` is only defined on a memory",
+            );
+        }
+        if self.proc_ref().comb {
+            return self.err(
+                codes::UNSUPPORTED,
+                Some(span),
+                "a memory write is state: write it in the clock arm of `always!`, not in the combinational process",
+            );
+        }
+        if !self.proc_ref().memory_write {
+            return self.err(
+                codes::UNSUPPORTED,
+                Some(span),
+                "a memory write is not allowed in an asynchronous reset arm: write it in the clock arm of `always!`",
+            );
+        }
+        let (memory, addr, value) = match self.lower_memory_write_parts(call, &span) {
+            Ok(parts) => parts,
+            Err(diagnostic) => return self.error(diagnostic),
+        };
+
+        let process = self.current_process();
+        if let Some((other, first)) = self.cur.memory_writers.get(&memory).cloned() {
+            if other != process {
+                let name = self.cur.memories[memory].name.clone();
+                let label = self.owner_label(Owner::Process(other));
+                return self.err(
+                    codes::MULTI_DRIVER,
+                    Some(span),
+                    format!(
+                        "memory `{name}` is written by {label} and by this process (the first write is at {first}); one memory may only be written by one process"
+                    ),
+                );
+            }
+        } else {
+            self.cur
+                .memory_writers
+                .insert(memory, (process, span.clone()));
+        }
+
+        self.drain_pending(out);
+        out.push(Stmt::MemWrite {
+            memory,
+            addr,
+            value,
+            source: span,
+        });
+        Ok(())
     }
 
     pub(super) fn lower_process_assign(
@@ -3054,6 +3141,7 @@ impl Compiler {
         let mut suffix = 1;
         while self.proc_ref().local_names.contains(&wire_name)
             || self.cur.signal_by_name.contains_key(&wire_name)
+            || self.cur.memory_by_field.contains_key(&wire_name)
         {
             wire_name = format!("{name}__{suffix}");
             suffix += 1;
@@ -3101,6 +3189,7 @@ impl Compiler {
         let mut suffix = 1;
         while self.proc_ref().local_names.contains(&wire_name)
             || self.cur.signal_by_name.contains_key(&wire_name)
+            || self.cur.memory_by_field.contains_key(&wire_name)
         {
             wire_name = format!("{name}__{suffix}");
             suffix += 1;

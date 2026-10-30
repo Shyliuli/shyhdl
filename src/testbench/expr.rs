@@ -34,6 +34,7 @@ use syn::{BinOp, Expr, Lit, UnOp};
 
 use crate::error::Result;
 use crate::metadata::{TypeField, ValueType};
+use crate::packed;
 
 use super::lower::{Generator, Name};
 use super::PortDirection;
@@ -247,13 +248,6 @@ fn minimal_bits(value: u128) -> u32 {
     bits.max(1)
 }
 
-fn fits(value: u128, width: u32) -> bool {
-    if width >= 128 {
-        return true;
-    }
-    value < (1u128 << width)
-}
-
 fn kind_of(ty: &ValueType) -> Kind {
     match ty {
         ValueType::Bool => Kind::Bool,
@@ -361,52 +355,47 @@ fn check_literal_fits(
     if width == 0 || width > 128 {
         return Err(generator.error(span, "a value must be between 1 and 128 bits wide"));
     }
+    if packed::literal_fits(literal.negative, literal.value, width, signed) {
+        return Ok(());
+    }
+    // The message names the range that refused the value.
     if signed {
-        // Two's complement: -2^(w-1)..= 2^(w-1) - 1.
-        let limit = 1u128 << (width - 1);
-        if literal.negative {
-            if literal.value > limit {
-                return Err(generator.error(
-                    span,
-                    format!(
-                        "the value -{} does not fit a signed {width} bit value (smallest -{limit})",
-                        literal.value
-                    ),
-                ));
-            }
-        } else if literal.value >= limit {
-            return Err(generator.error(
-                span,
-                format!(
-                    "the value {} does not fit a signed {width} bit value (largest {})",
-                    literal.value,
-                    limit - 1
-                ),
-            ));
-        }
-        Ok(())
-    } else {
+        let bound = packed::signed_bound(width);
         if literal.negative {
             return Err(generator.error(
                 span,
                 format!(
-                    "a negative literal needs a signed target; use `int<{width}>` or `as \
-                     int<{width}>` for a signed value, or write the bit pattern explicitly"
-                ),
-            ));
-        }
-        if !fits(literal.value, width) {
-            return Err(generator.error(
-                span,
-                format!(
-                    "the value {} does not fit in {width} bits; widen the target or write a smaller \
-                     value",
+                    "the value -{} does not fit a signed {width} bit value (smallest -{bound})",
                     literal.value
                 ),
             ));
         }
-        Ok(())
+        return Err(generator.error(
+            span,
+            format!(
+                "the value {} does not fit a signed {width} bit value (largest {})",
+                literal.value,
+                bound - 1
+            ),
+        ));
     }
+    if literal.negative {
+        return Err(generator.error(
+            span,
+            format!(
+                "a negative literal needs a signed target; use `int<{width}>` or `as \
+                 int<{width}>` for a signed value, or write the bit pattern explicitly"
+            ),
+        ));
+    }
+    Err(generator.error(
+        span,
+        format!(
+            "the value {} does not fit in {width} bits; widen the target or write a smaller \
+             value",
+            literal.value
+        ),
+    ))
 }
 
 impl<'a> Generator<'a> {
@@ -676,7 +665,7 @@ impl<'a> Generator<'a> {
                     // adapted as a typed value, which keeps the documented unsigned
                     // widening while refusing a narrowing or a sign change.
                     Some(width) => {
-                        if !fits(number, width) {
+                        if !packed::literal_fits(false, number, width, false) {
                             return Err(self.error(
                                 span,
                                 format!(
@@ -707,7 +696,7 @@ impl<'a> Generator<'a> {
                         None => {
                             let width = explicit.unwrap_or_else(|| minimal_bits(number));
                             let lowered = Lowered::integer(number, false, width, false);
-                            if !fits(number, width) {
+                            if !packed::literal_fits(false, number, width, false) {
                                 return Err(self.error(
                                     span,
                                     format!(
@@ -1029,22 +1018,33 @@ impl<'a> Generator<'a> {
                 (left.width.max(right.width), left_sign)
             }
             (false, false) => {
-                if left.width != right.width {
-                    let width = left.width.max(right.width);
-                    return Err(self.error(
-                        span,
-                        format!(
-                            "`{operator}` needs two operands of the same width, but these are {} \
-                             and {} bits; make one explicit, for example `x[0..{width}]` or `as \
-                             uint<{width}>`",
-                            left.width, right.width
-                        ),
-                    ));
-                }
-                if left_sign != right_sign {
-                    return Err(self.error(span, sign_mismatch_message(left_sign, right_sign)));
-                }
-                (left.width, left_sign)
+                let width = packed::align(
+                    packed::Width {
+                        bits: left.width,
+                        signed: left_sign,
+                    },
+                    packed::Width {
+                        bits: right.width,
+                        signed: right_sign,
+                    },
+                )
+                .map_err(|error| match error {
+                    packed::AlignError::Widths { lhs, rhs } => {
+                        let width = lhs.max(rhs);
+                        self.error(
+                            span,
+                            format!(
+                                "`{operator}` needs two operands of the same width, but these are \
+                                 {lhs} and {rhs} bits; make one explicit, for example `x[0..{width}]` \
+                                 or `as uint<{width}>`"
+                            ),
+                        )
+                    }
+                    packed::AlignError::Signs { lhs, rhs } => {
+                        self.error(span, sign_mismatch_message(lhs, rhs))
+                    }
+                })?;
+                (width.bits, width.signed)
             }
         };
         let context = WidthContext { width, signed };
@@ -1586,10 +1586,11 @@ impl<'a> Generator<'a> {
 
 /// One operand of a typed comparison.
 ///
-/// Equality of an aggregate has to be built part by part, and each part must be a
-/// legal Verilog expression. A signal reference can be folded (a part-select of
-/// its root, never a select of a select); a constant is computed here and emitted
-/// as one sized literal, because Verilog cannot select bits of a literal.
+/// Equality of an aggregate is built part by part from a [`packed::Equality`]
+/// plan, and each part must be a legal Verilog expression. A signal reference can
+/// be folded (a part-select of its root, never a select of a select); a constant
+/// is computed here and emitted as one sized literal, because Verilog cannot
+/// select bits of a literal.
 enum Operand {
     Signal(Selection),
     /// Any other expression whose text is a legal Verilog expression: its parts
@@ -1602,12 +1603,14 @@ enum Operand {
 
 impl Operand {
     /// The text of `width` bits at `lo` inside this operand.
-    fn part(&self, lo: u32, width: u32, ty: &ValueType) -> String {
+    fn part(&self, lo: u32, width: u32) -> String {
         match self {
             Operand::Signal(selection) => Selection {
                 constant: selection.constant + lo,
                 width,
-                ty: ty.clone(),
+                // Only the selected width matters here; the bits are compared as
+                // bits, so the part is read as an unsigned range of that width.
+                ty: ValueType::UInt { width },
                 ..selection.clone()
             }
             .text(),
@@ -1979,7 +1982,7 @@ impl<'a> Generator<'a> {
                 magnitude
             }
             ValueType::UInt { width } => {
-                if negative || !fits(magnitude, *width) {
+                if !packed::literal_fits(negative, magnitude, *width, false) {
                     return Err(
                         self.error(span, format!("`{magnitude}` does not fit `uint<{width}>`"))
                     );
@@ -1993,13 +1996,12 @@ impl<'a> Generator<'a> {
                         "an `int<128>` literal is not supported in a testbench",
                     ));
                 }
-                let limit = 1i128 << (*width - 1);
                 let value = if negative {
                     -(magnitude as i128)
                 } else {
                     magnitude as i128
                 };
-                if value < -limit || value > limit - 1 {
+                if !packed::literal_fits(negative, magnitude, *width, true) {
                     return Err(self.error(span, format!("`{value}` does not fit `int<{width}>`")));
                 }
                 // Two's complement at the declared width.
@@ -2011,7 +2013,7 @@ impl<'a> Generator<'a> {
             }
             // An enum (or any other packed type) takes the literal's raw bits.
             _ => {
-                if negative || !fits(magnitude, width) {
+                if !packed::literal_fits(negative, magnitude, width, false) {
                     return Err(
                         self.error(span, format!("`{magnitude}` does not fit {width} bits"))
                     );
@@ -2036,8 +2038,8 @@ impl<'a> Generator<'a> {
         let left_selection = self.selection(left)?;
         let right_selection = self.selection(right)?;
         let ty = match (&left_selection, &right_selection) {
-            (Some(left), _) if contains_enum(&left.ty) => left.ty.clone(),
-            (_, Some(right)) if contains_enum(&right.ty) => right.ty.clone(),
+            (Some(left), _) if packed::contains_enum(&left.ty) => left.ty.clone(),
+            (_, Some(right)) if packed::contains_enum(&right.ty) => right.ty.clone(),
             _ => return Ok(None),
         };
         for selection in [&left_selection, &right_selection].into_iter().flatten() {
@@ -2061,31 +2063,38 @@ impl<'a> Generator<'a> {
         let Some(right) = self.comparison_operand(right, &ty, span)? else {
             return Ok(None);
         };
-        Ok(Some(self.typed_equality(&left, &right, &ty, 0)?))
+        Ok(Some(self.typed_equality(&left, &right, &ty, span)?))
     }
 
-    /// A boolean expression that is true exactly when two runtime values are equal
-    /// as values of `ty`.
+    /// A boolean expression that is true exactly when two runtime values are
+    /// equal as values of `ty`.
     ///
-    /// The comparison recurses on the *type* and compares the two values part by
-    /// part. A tag carrying `x`/`z` never compares equal, two equal tags that name
-    /// no variant compare by tag alone, and a variant's payload is compared only
-    /// while that variant is the active one, so nested inactive payloads are
-    /// ignored.
+    /// The comparison follows [`packed::Equality`]: an enum compares its tag and
+    /// the payload of the variant that is active, so nested inactive payloads are
+    /// ignored, and a tag carrying `x`/`z` never compares equal.
     fn typed_equality(
         &self,
         left: &Operand,
         right: &Operand,
         ty: &ValueType,
-        offset: u32,
+        span: Span,
     ) -> Result<String> {
-        match ty {
-            ValueType::Bool | ValueType::UInt { .. } | ValueType::SInt { .. } => {
-                let width = ty.bit_width()?;
-                if let (Some(a), Some(b)) = (
-                    left.part_value(offset, width),
-                    right.part_value(offset, width),
-                ) {
+        let plan = packed::equality(ty).map_err(|error| self.error(span, error))?;
+        self.equal_parts(left, right, &plan)
+    }
+
+    /// The comparison one [`packed::Equality`] plan describes.
+    fn equal_parts(
+        &self,
+        left: &Operand,
+        right: &Operand,
+        plan: &packed::Equality,
+    ) -> Result<String> {
+        match plan {
+            packed::Equality::Bits { lo, width } => {
+                if let (Some(a), Some(b)) =
+                    (left.part_value(*lo, *width), right.part_value(*lo, *width))
+                {
                     // Two constants: decide this part here. It compares the selected
                     // bits, not the whole packed operand, because a payload lives at
                     // an offset inside its enum.
@@ -2093,44 +2102,24 @@ impl<'a> Generator<'a> {
                 }
                 Ok(format!(
                     "({} === {})",
-                    left.part(offset, width, ty),
-                    right.part(offset, width, ty)
+                    left.part(*lo, *width),
+                    right.part(*lo, *width)
                 ))
             }
-            ValueType::Struct { fields, .. } => {
-                let total = ty.bit_width()?;
-                let mut prefix = 0u32;
-                let mut parts = Vec::new();
-                for field in fields {
-                    let width = field.ty.bit_width()?;
-                    let lo = total - prefix - width;
-                    parts.push(self.typed_equality(left, right, &field.ty, offset + lo)?);
-                    prefix += width;
+            packed::Equality::All(parts) => {
+                let mut texts = Vec::with_capacity(parts.len());
+                for part in parts {
+                    texts.push(self.equal_parts(left, right, part)?);
                 }
-                Ok(conjoin(&parts))
+                Ok(conjoin(&texts))
             }
-            ValueType::Array { element, len } => {
-                let width = element.bit_width()?;
-                let mut parts = Vec::new();
-                for index in 0..*len {
-                    parts.push(self.typed_equality(
-                        left,
-                        right,
-                        element,
-                        offset + index as u32 * width,
-                    )?);
-                }
-                Ok(conjoin(&parts))
-            }
-            ValueType::Enum {
+            packed::Equality::Enum {
+                tag_lo,
                 tag_width,
                 variants,
-                ..
             } => {
-                let tag_width = *tag_width;
-                let tag_ty = ValueType::UInt { width: tag_width };
-                let tag_left = left.part(offset, tag_width, &tag_ty);
-                let tag_right = right.part(offset, tag_width, &tag_ty);
+                let tag_left = left.part(*tag_lo, *tag_width);
+                let tag_right = right.part(*tag_lo, *tag_width);
                 // `x`/`z` in either tag is a failure, not an unknown variant that
                 // happens to be equal. `^tag` is `x` whenever the tag has any x/z.
                 let mut known = Vec::new();
@@ -2146,16 +2135,10 @@ impl<'a> Generator<'a> {
                 let mut payload = "1'b1".to_string();
                 // A tag that names no variant falls through to `1'b1`: the tags are
                 // already equal, and nothing else about the value is defined.
-                for variant in variants.iter().rev() {
-                    let Some(payload_ty) = &variant.payload else {
-                        continue;
-                    };
-                    let branch =
-                        self.typed_equality(left, right, payload_ty, offset + tag_width)?;
-                    payload = format!(
-                        "(({tag_left} === {tag_width}'d{}) ? {branch} : {payload})",
-                        variant.tag
-                    );
+                for (tag, part) in variants.iter().rev() {
+                    let branch = self.equal_parts(left, right, part)?;
+                    payload =
+                        format!("(({tag_left} === {tag_width}'d{tag}) ? {branch} : {payload})");
                 }
                 Ok(format!(
                     "({} && {tags_equal} && ({payload}))",
@@ -2214,15 +2197,6 @@ fn integer_literal(value: &syn::LitInt, span: Span, generator: &Generator<'_>) -
 ///
 /// Only these comparisons need the part-by-part form: a plain struct or array of
 /// integers keeps the ordinary bit comparison.
-pub(super) fn contains_enum(ty: &ValueType) -> bool {
-    match ty {
-        ValueType::Enum { .. } => true,
-        ValueType::Struct { fields, .. } => fields.iter().any(|field| contains_enum(&field.ty)),
-        ValueType::Array { element, .. } => contains_enum(element),
-        _ => false,
-    }
-}
-
 /// The fields of a payload the frontend generated for a variant.
 ///
 /// A generated aggregate is named `enum::variant`; any other struct payload is a

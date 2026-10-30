@@ -104,8 +104,8 @@ mod verilog;
 pub use diagnostic::{codes, Diagnostic, Diagnostics, Note, Severity};
 pub use mir::{
     BinOp, BodyItem, CaseArm, ClockSpec, Connection, Design, Edge, Expr, ExprKind, Instance,
-    LValue, Module, Param, Port, PortDir, Process, ProcessKind, ResetSpec, Signal, SignalId,
-    SignalKind, SignalScope, Stmt, StructTy, Ty, TyField, UnOp,
+    LValue, Memory, Module, Param, Port, PortDir, Process, ProcessKind, ResetSpec, Signal,
+    SignalId, SignalKind, SignalScope, Stmt, StructTy, Ty, TyField, UnOp,
 };
 pub use outline::{concrete_instances, declared_instances};
 

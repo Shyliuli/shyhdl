@@ -3,6 +3,8 @@
 
 use super::*;
 
+use crate::packed;
+
 pub(super) fn describe_literal(lit: &syn::Lit) -> &'static str {
     match lit {
         syn::Lit::Str(_) => "a string literal",
@@ -91,6 +93,9 @@ pub(super) fn walk_reads(expr: &Expr, module: &ModuleBuild, reads: &mut Vec<Read
             }
         }
         ExprKind::Replicate { value, .. } => walk_reads(value, module, reads),
+        // The memory itself is not a signal: a read depends on its address, and
+        // the write path is sequential, so its data is no combinational source.
+        ExprKind::MemRead { addr, .. } => walk_reads(addr, module, reads),
     }
 }
 
@@ -259,16 +264,6 @@ pub(super) fn check_width(
     Ok(())
 }
 
-/// Does this type hold an enum anywhere? Equality has to read those by type.
-pub(super) fn mentions_enum(ty: &Ty) -> bool {
-    match ty {
-        Ty::Enum(_) => true,
-        Ty::Array { element, .. } => mentions_enum(element),
-        Ty::Struct(strukt) => strukt.fields.iter().any(|field| mentions_enum(&field.ty)),
-        _ => false,
-    }
-}
-
 /// Does this type hold an array or an enum anywhere? Those are the shapes a copy
 /// has to match exactly; a plain struct keeps the lenient width comparison it
 /// always had.
@@ -335,14 +330,25 @@ fn signedness_mismatch(message: String, span: &SourceSpan) -> Diagnostic {
     )
 }
 
-pub(super) fn require_same_width(
+/// The width and the way the bits are read, for the shared operand rules.
+fn width_of(ty: &Ty) -> packed::Width {
+    packed::Width {
+        bits: ty.width(),
+        signed: ty.is_signed(),
+    }
+}
+
+/// Both operands of an operation must have the same width and read their bits
+/// the same way.
+pub(super) fn require_aligned(
     lhs: &Ty,
     rhs: &Ty,
     op: crate::frontend::mir::BinOp,
     span: &SourceSpan,
 ) -> Result<(), Diagnostic> {
-    if lhs.width() != rhs.width() {
-        return Err(Diagnostic::error(
+    match packed::align(width_of(lhs), width_of(rhs)) {
+        Ok(_) => Ok(()),
+        Err(packed::AlignError::Widths { .. }) => Err(Diagnostic::error(
             codes::WIDTH_MISMATCH,
             Some(span.clone()),
             format!(
@@ -355,30 +361,17 @@ pub(super) fn require_same_width(
         .with_note(
             "hardware arithmetic is equal width here; widen one side explicitly",
             None,
-        ));
+        )),
+        Err(packed::AlignError::Signs { .. }) => Err(signedness_mismatch(
+            format!(
+                "`{}` mixes a signed and an unsigned value: {} and {}",
+                op.source(),
+                lhs.describe(),
+                rhs.describe()
+            ),
+            span,
+        )),
     }
-    Ok(())
-}
-
-/// Both operands of an operation must read their bits the same way.
-pub(super) fn require_same_signedness(
-    lhs: &Ty,
-    rhs: &Ty,
-    op: crate::frontend::mir::BinOp,
-    span: &SourceSpan,
-) -> Result<(), Diagnostic> {
-    if lhs.is_signed() == rhs.is_signed() {
-        return Ok(());
-    }
-    Err(signedness_mismatch(
-        format!(
-            "`{}` mixes a signed and an unsigned value: {} and {}",
-            op.source(),
-            lhs.describe(),
-            rhs.describe()
-        ),
-        span,
-    ))
 }
 
 /// A shift count is an unsigned value or a build-time constant.
@@ -445,6 +438,7 @@ pub(super) fn check_unsized(expr: &Expr) -> Result<(), Diagnostic> {
         }
         ExprKind::Replicate { value, .. } => check_unsized(value),
         ExprKind::BitSelect { index, .. } => check_unsized(index),
+        ExprKind::MemRead { addr, .. } => check_unsized(addr),
         ExprKind::Const { .. } | ExprKind::Signal(_) | ExprKind::Slice { .. } => Ok(()),
         ExprKind::Pattern { .. } => Ok(()),
     }

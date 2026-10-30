@@ -134,6 +134,17 @@ impl VisitMut for EditorRewrite {
         wrap_literal(&mut assign.right);
     }
 
+    /// A memory write takes the element type as its second argument:
+    /// `mem.write(addr, 0)` passes a literal where that type is expected.
+    fn visit_expr_method_call_mut(&mut self, call: &mut syn::ExprMethodCall) {
+        syn::visit_mut::visit_expr_method_call_mut(self, call);
+        if call.method == "write" {
+            if let Some(value) = call.args.iter_mut().last() {
+                wrap_literal(value);
+            }
+        }
+    }
+
     /// An integer literal next to a hardware value is a hardware value of the
     /// other operand's width: `a + 1`, `a & 0xF0`, `a >> 1`, `a == 0`.
     ///

@@ -29,6 +29,7 @@ use proc_macro2::Span;
 use syn::spanned::Spanned;
 
 use crate::metadata::{EnumVariant, TypeField, ValueType};
+use crate::packed;
 
 /// Pattern *nesting* limit: how deeply sub-patterns may nest (lowering only).
 const MAX_PATTERN_DEPTH: usize = 16;
@@ -690,7 +691,7 @@ fn range_bound(expr: &syn::Expr, width: u32, span: Span) -> Result<u128, PatErro
             ),
         ));
     }
-    if width > 128 || !fits_unsigned(value, width) {
+    if width > 128 || !packed::literal_fits(false, value, width, false) {
         return Err(PatError::new(
             span,
             PatErrorKind::LiteralOutOfRange { width },
@@ -1118,7 +1119,7 @@ fn const_pattern(value: u128, ty: &ValueType, span: Span, negative: bool) -> Res
             if *width > 128 {
                 return Err(wide_integer_pattern(span));
             }
-            if negative || !fits_unsigned(value, *width) {
+            if !packed::literal_fits(negative, value, *width, false) {
                 return Err(out_of_range(span, *width));
             }
             Ok(Pat::Int(value))
@@ -1127,24 +1128,20 @@ fn const_pattern(value: u128, ty: &ValueType, span: Span, negative: bool) -> Res
             if *width > 128 {
                 return Err(wide_integer_pattern(span));
             }
-            let limit = signed_limit(*width);
-            if negative {
-                if value == 0 {
-                    return Ok(Pat::Int(0));
-                }
-                if value > limit {
-                    return Err(out_of_range(span, *width));
-                }
-                Ok(Pat::Int(if *width == 128 {
-                    value.wrapping_neg()
-                } else {
-                    (1u128 << *width) - value
-                }))
-            } else if value < limit {
-                Ok(Pat::Int(value))
-            } else {
-                Err(out_of_range(span, *width))
+            if !packed::literal_fits(negative, value, *width, true) {
+                return Err(out_of_range(span, *width));
             }
+            if !negative {
+                return Ok(Pat::Int(value));
+            }
+            if value == 0 {
+                return Ok(Pat::Int(0));
+            }
+            Ok(Pat::Int(if *width == 128 {
+                value.wrapping_neg()
+            } else {
+                (1u128 << *width) - value
+            }))
         }
         other => Err(PatError::new(
             span,
@@ -1168,17 +1165,6 @@ fn wide_integer_pattern(span: Span) -> PatError {
                 .to_string(),
         ),
     )
-}
-
-fn fits_unsigned(value: u128, width: u32) -> bool {
-    width >= 128 || value < (1u128 << width)
-}
-
-/// `2^(width - 1)`: the exclusive upper bound of a signed positive value, and
-/// the inclusive magnitude of a negative one.
-fn signed_limit(width: u32) -> u128 {
-    let shift = width.saturating_sub(1).min(127);
-    1u128 << shift
 }
 
 fn describe(ty: &ValueType) -> String {
