@@ -1505,11 +1505,10 @@ fn parse_hints(source: &str, source_name: &str, span: Option<&SourceSpan>) -> Ve
         });
     }
 
-    if let Some(line) = window
+    if window
         .iter()
-        .find(|line| has_unbraced_const_expression(line))
+        .any(|line| has_unbraced_const_expression(line))
     {
-        let _ = line;
         notes.push(Note {
             message: "const width expressions must be braced: write `uint<{ N + 1 }>` (or `zext::<{ N + 1 }>()`); \
                       the frontend evaluates them while compiling"

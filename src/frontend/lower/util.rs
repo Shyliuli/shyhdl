@@ -410,10 +410,9 @@ pub(super) fn check_unsized(expr: &Expr) -> Result<(), Diagnostic> {
         ExprKind::Binary {
             op: crate::frontend::mir::BinOp::Shl | crate::frontend::mir::BinOp::Shr,
             lhs,
-            rhs,
+            ..
         } => {
             check_unsized(lhs)?;
-            let _ = rhs;
             Ok(())
         }
         ExprKind::Binary { lhs, rhs, .. } => {

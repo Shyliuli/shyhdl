@@ -1194,11 +1194,10 @@ fn build_elf(
         sh_addralign: 1,
         sh_entsize: 0,
     });
-    for ((index, name_id), (offset, (_, bytes))) in debug_indices
+    for ((_, name_id), (offset, (_, bytes))) in debug_indices
         .iter()
         .zip(debug_offsets.iter().zip(&debug_sections))
     {
-        let _ = index;
         writer.write_section_header(&SectionHeader {
             name: Some(*name_id),
             sh_type: elf::SHT_PROGBITS,

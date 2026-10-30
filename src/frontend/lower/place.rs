@@ -271,7 +271,7 @@ impl Compiler {
         let span = self
             .span(expr.span())
             .unwrap_or_else(|| self.cur.struct_source.clone());
-        match self.resolve_place(expr, false)? {
+        match self.resolve_place(expr)? {
             Place::Signal { signal, range, ty } => Ok(ReadPlace::Signal { signal, range, ty }),
             Place::ChildOutput {
                 instance,
@@ -324,7 +324,7 @@ impl Compiler {
         let span = self
             .span(expr.span())
             .unwrap_or_else(|| self.cur.struct_source.clone());
-        match self.resolve_place(expr, true)? {
+        match self.resolve_place(expr)? {
             Place::Signal { signal, range, ty } => {
                 self.check_writable(signal, &span)?;
                 Ok(WritePlace::Signal { signal, range, ty })
@@ -363,11 +363,7 @@ impl Compiler {
     }
 
     /// Shared place resolution for reads and writes.
-    pub(super) fn resolve_place(
-        &mut self,
-        expr: &syn::Expr,
-        writing: bool,
-    ) -> Result<Place, Diagnostic> {
+    pub(super) fn resolve_place(&mut self, expr: &syn::Expr) -> Result<Place, Diagnostic> {
         let span = self
             .span(expr.span())
             .unwrap_or_else(|| self.cur.struct_source.clone());
@@ -392,7 +388,7 @@ impl Compiler {
                     "`self` must be followed by a field name",
                 ));
             };
-            return self.resolve_field_place(&first, &mut path, &span, writing, true);
+            return self.resolve_field_place(&first, &mut path, &span, true);
         }
 
         let Some(name) = base_name else {
@@ -416,7 +412,7 @@ impl Compiler {
         // A bare field name is the implicit `self.<name>`: a module field or a
         // child instance is reachable without `self.`, after locals and
         // parameters have had their chance.
-        self.resolve_field_place(&name, &mut path, &span, writing, false)
+        self.resolve_field_place(&name, &mut path, &span, false)
     }
 
     /// Resolve `self.<first>` (or the implicit bare form) plus the remaining
@@ -429,7 +425,6 @@ impl Compiler {
         first: &str,
         path: &mut Vec<Component>,
         span: &SourceSpan,
-        writing: bool,
         explicit_self: bool,
     ) -> Result<Place, Diagnostic> {
         let prefix = if explicit_self {
@@ -530,7 +525,6 @@ impl Compiler {
                         format!("`{port_name}` is a child input: connect the whole value"),
                     ));
                 }
-                let _ = writing;
                 return Ok(Place::ChildInput { instance, port });
             }
             let port_ty = self.cur.instances[instance].child_ports[port].ty.clone();

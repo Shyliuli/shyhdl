@@ -123,8 +123,7 @@ fn emit_module(module: &Module, out: &mut String) {
     // Instances first, then the continuous wiring, then the processes: the
     // connection order in the source does not change the emitted topology
     let mut wrote_section = false;
-    for (index, instance) in module.instances.iter().enumerate() {
-        let _ = index;
+    for instance in &module.instances {
         out.push('\n');
         let _ = writeln!(out, "    // {}", instance.source);
         let _ = writeln!(

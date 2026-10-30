@@ -45,7 +45,7 @@ impl Compiler {
             syn::Expr::Repeat(repeat) => self.lower_repeat_literal(repeat, expected, span),
             syn::Expr::MethodCall(call) => self.lower_method(call, span),
             syn::Expr::Call(call) => self.lower_call_or_variant(call, expected, span),
-            syn::Expr::Binary(binary) => self.lower_binary(binary, expr, expected, span),
+            syn::Expr::Binary(binary) => self.lower_binary(binary, expected, span),
             syn::Expr::Unary(unary) => self.lower_unary(unary, expected, span),
             syn::Expr::Paren(paren) => self.lower_expr(&paren.expr, expected),
             syn::Expr::Group(group) => self.lower_expr(&group.expr, expected),
@@ -293,7 +293,6 @@ impl Compiler {
     pub(super) fn lower_binary(
         &mut self,
         binary: &syn::ExprBinary,
-        expression: &syn::Expr,
         expected: Option<&Ty>,
         span: SourceSpan,
     ) -> Result<Expr, Diagnostic> {
@@ -436,7 +435,6 @@ impl Compiler {
             }
         }
 
-        let _ = expression;
         let result_ty = match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul => {
                 if !matches!(lhs.ty, Ty::UInt(_) | Ty::SInt(_))
@@ -1163,7 +1161,6 @@ impl Compiler {
                     }
                     _ => unreachable!(),
                 };
-                let _ = source_width;
                 Ok(Expr {
                     ty,
                     kind,

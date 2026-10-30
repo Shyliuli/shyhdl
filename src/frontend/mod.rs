@@ -424,7 +424,6 @@ fn merge_name(
     diagnostics: &mut Diagnostics,
     insert: impl FnOnce(&mut parse::ParsedFile),
 ) {
-    let _ = parsed;
     if let Some(first) = declared.get(name) {
         diagnostics.push(
             Diagnostic::error(
